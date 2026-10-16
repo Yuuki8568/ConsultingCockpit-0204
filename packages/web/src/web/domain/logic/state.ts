@@ -784,6 +784,23 @@ export interface ImportPreview {
   reports: number;
 }
 
+/** Reject ambiguous identities before normalization or any storage mutation. */
+export function assertUniqueImportIds(st: { cases?: unknown; leads?: unknown }): void {
+  for (const name of ["cases", "leads"] as const) {
+    const rows = st[name];
+    if (rows === undefined) continue;
+    if (!Array.isArray(rows)) throw new Error(`${name} は配列で指定してください`);
+    const ids = new Set<string>();
+    for (const row of rows) {
+      const id = row && typeof row === "object" ? row.id : undefined;
+      if (typeof id !== "string" || !id.trim() || id.includes("__conflict") || id.length > 59)
+        throw new Error(`${name}: 不正または空のIDがあります`);
+      if (ids.has(id)) throw new Error(`${name}: 重複IDがあります。取込は中止しました`);
+      ids.add(id);
+    }
+  }
+}
+
 /** v3 バックアップ JSON の検証＋件数プレビュー */
 export function previewImport(raw: string): ImportPreview {
   const empty: ImportPreview = {
@@ -799,6 +816,7 @@ export function previewImport(raw: string): ImportPreview {
   const res = parseImportJson(raw);
   if (!res.ok) return { ...empty, error: res.error };
   const st = res.st;
+  try { assertUniqueImportIds(st); } catch (e) { return { ...empty, error: String(e) }; }
   if (!Array.isArray(st.cases) && !Array.isArray(st.leads))
     return { ...empty, error: "cases も leads も見つかりません（別形式のファイルの可能性）" };
   const cases: Any[] = Array.isArray(st.cases) ? st.cases : [];
@@ -821,5 +839,6 @@ export function previewImport(raw: string): ImportPreview {
 export function importVaultState(raw: string): VaultState {
   const res = parseImportJson(raw);
   if (!res.ok) throw new Error(res.error);
+  assertUniqueImportIds(res.st);
   return normalizeVaultState(res.st);
 }

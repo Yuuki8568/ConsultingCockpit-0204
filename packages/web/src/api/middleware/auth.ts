@@ -35,3 +35,9 @@ export const authed = base.use(async ({ context, next }) => {
   }
   return next({ context: { user: session.user, session: session.session } });
 });
+
+export const recentlyAuthed = authed.use(async ({ context, next }) => {
+  if (Date.now() - new Date(context.session.createdAt).getTime() > 15 * 60_000)
+    throw new ORPCError("UNAUTHORIZED", { message: "重要操作の前にサインアウトして再度サインインしてください（15分以内の再認証が必要です）" });
+  return next();
+});

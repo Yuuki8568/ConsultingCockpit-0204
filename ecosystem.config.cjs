@@ -3,7 +3,7 @@ module.exports = {
     {
       name: "web-app",
       cwd: __dirname,
-      script: "packages/web/src/__server.ts",
+      script: "packages/web/src/server.ts",
       interpreter: "bun",
       interpreter_args: ["--env-file=.env"],
       exec_mode: "fork",
@@ -12,6 +12,8 @@ module.exports = {
       restart_delay: 1000,
       env: {
         PORT: process.env.PORT || 4200,
+        NODE_ENV: "production",
+        RELEASE_SHA: process.env.RELEASE_SHA || "unversioned",
       },
     },
   ],

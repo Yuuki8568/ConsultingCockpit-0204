@@ -1,3 +1,4 @@
+import { Hono } from "hono";
 import type { RouterClient } from "@orpc/server";
 import { createApp } from "./__core/app";
 import { auth } from "./auth";
@@ -40,4 +41,23 @@ app.use("/api/auth/*", async (c, next) => {
 
 app.on(["GET", "POST"], "/api/auth/*", (c) => auth.handler(c.req.raw));
 
-export default app;
+// Wrap the template app so denied origins never reach its reflecting CORS middleware.
+const guarded = new Hono();
+guarded.use("*", async (c, next) => {
+  const origin = c.req.header("origin");
+  if (!isAllowedOrigin(origin)) return c.json({ error: "許可されていない接続元です。" }, 403);
+  if (c.req.method === "OPTIONS") {
+    if (origin) {
+      c.header("Access-Control-Allow-Origin", origin);
+      c.header("Access-Control-Allow-Credentials", "true");
+      c.header("Vary", "Origin");
+    }
+    c.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    c.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    return c.body(null, 204);
+  }
+  await next();
+  c.header("Cache-Control", "no-store");
+});
+guarded.route("/", app);
+export default guarded;

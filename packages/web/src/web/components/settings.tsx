@@ -707,14 +707,18 @@ function RekeyModal({ open, onClose }: { open: boolean; onClose: () => void }) {
       const verifier = await buildVerifier(newKeys.vaultKey);
       // レコードと録画を新しい鍵で封じ直す（録画は仮チャンクとして置く）
       prepared = await vaultStore.prepareReencrypt(newKeys.vaultKey, newKeys.macKey);
-      const res = await client.vault.rekey({
+      const request = {
+        expectedGeneration: prepared.generation,
         kdfSalt: salt,
         kdfIterations: SEC_CONFIG.KDF_ITERATIONS,
         verifierCiphertext: verifier.ciphertext,
         verifierIv: verifier.iv,
         records: prepared.records,
-      });
+      };
+      await vaultStore.saveRekeyRequest(request);
+      const res = await client.vault.rekey(request, { signal: AbortSignal.timeout(15000) });
       await vaultStore.commitReencrypt(newKeys.vaultKey, newKeys.macKey, prepared);
+      vaultStore.setBackupKdf(salt, SEC_CONFIG.KDF_ITERATIONS);
       prepared = null;
       setMsg({
         tone: "ok",
@@ -727,14 +731,12 @@ function RekeyModal({ open, onClose }: { open: boolean; onClose: () => void }) {
       setN2("");
     } catch (e) {
       // 失敗した場合は仮チャンクを捨てて、今の鍵・データは元のままにする
-      if (prepared) {
-        await vaultStore.abortReencrypt().catch(() => undefined);
-      }
+      await vaultStore.abortReencrypt().catch(() => undefined);
       setMsg({
         tone: "alert",
         text:
           (e instanceof Error ? e.message : String(e)) +
-          "（変更は中止されました。これまでのパスフレーズでそのまま開けます）",
+          "（確定状態を確認できない場合があります。旧・新両方のパスフレーズを保管し、再解錠してください。復旧原本は削除していません）",
       });
     } finally {
       setBusy(false);
@@ -825,6 +827,7 @@ function DataTab() {
   const desktop = useDesktop();
   const fileRef = useRef<HTMLInputElement>(null);
   const [preview, setPreview] = useState<ReturnType<typeof previewImport> | null>(null);
+  const [backupPassphrase, setBackupPassphrase] = useState("");
   const [raw, setRaw] = useState<string>("");
   const [done, setDone] = useState<string | null>(null);
 
@@ -838,7 +841,8 @@ function DataTab() {
         if (isEncryptedBackup(text)) {
           // 暗号化された控えは、この金庫の鍵で開いてから確認画面へ進む
           try {
-            text = await decryptBackup(text);
+            text = await decryptBackup(text, backupPassphrase || undefined);
+            setBackupPassphrase("");
           } catch {
             setPreview({
               ok: false,
@@ -893,6 +897,10 @@ function DataTab() {
         title="旧版（v3）のデータを取り込む"
         note="Netlify 版で書き出した JSON をそのまま読み込めます。"
       >
+        <label className="field-label">別の金庫・鍵変更前の控えを復元する場合：出力時のパスフレーズ
+          <input className="field" type="password" autoComplete="off" value={backupPassphrase}
+            onChange={(e) => setBackupPassphrase(e.target.value)} />
+        </label>
         <input
           ref={fileRef}
           type="file"

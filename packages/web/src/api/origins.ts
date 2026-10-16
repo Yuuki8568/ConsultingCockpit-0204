@@ -23,7 +23,8 @@ function normalize(value: string): string | null {
   const trimmed = value.trim();
   if (!trimmed) return null;
   try {
-    return new URL(trimmed).origin;
+    const url = new URL(trimmed);
+    return ["https:", "http:"].includes(url.protocol) ? url.origin : null;
   } catch {
     return null;
   }
@@ -32,7 +33,7 @@ function normalize(value: string): string | null {
 /** 許可するオリジンの一覧 */
 export function allowedOrigins(): string[] {
   const list = new Set<string>();
-  for (const l of LOCAL) list.add(l);
+  if (process.env.NODE_ENV !== "production") for (const l of LOCAL) list.add(l);
 
   const site = normalize(process.env.WEBSITE_URL ?? "");
   if (site) list.add(site);
@@ -54,7 +55,6 @@ export function allowedOrigins(): string[] {
 export function isAllowedOrigin(origin: string | null | undefined): boolean {
   if (!origin) return true;
   if (origin === "null") return false;
-  if (origin.startsWith("file://")) return true; // 卓上アプリ
-  if (origin.startsWith("runable-consult-rjau47t://")) return true; // スマートフォンアプリ
+  if (origin === "runable-consult-rjau47t://") return true; // exact native client origin
   return allowedOrigins().includes(origin);
 }

@@ -136,7 +136,7 @@ export async function deriveVaultKeys(
     ["encrypt", "decrypt"],
   );
   const macKey = await s.deriveKey(
-    params,
+    { ...params, salt: enc.encode("cc4:fingerprint:v2:" + saltB64) },
     baseKey,
     { name: "HMAC", hash: "SHA-256", length: 256 },
     false,

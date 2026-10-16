@@ -31,6 +31,7 @@ import {
   loadOffline,
   saveOne,
   syncAndLoad,
+  setVerifiedGeneration,
   type HubAction,
   type MobileCase,
   type MobileLead,
@@ -187,6 +188,7 @@ export function VaultProvider({ children }: { children: ReactNode }) {
           await rememberKey(k, p.kdfSalt);
           setHasSavedKey(true);
         }
+        setVerifiedGeneration(p.generation);
         setKey(k);
         await load(k);
         void client.devices

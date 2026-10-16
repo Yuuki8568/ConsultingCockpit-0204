@@ -54,8 +54,9 @@ function tx<T>(
       new Promise<T>((resolve, reject) => {
         const t = db.transaction(store, mode);
         const req = fn(t.objectStore(store));
-        req.onsuccess = () => resolve(req.result);
-        req.onerror = () => reject(req.error);
+        t.oncomplete = () => resolve(req.result);
+        t.onabort = () => reject(t.error ?? new Error("保存処理が中断されました"));
+        t.onerror = () => reject(t.error);
       }),
   );
 }
@@ -70,12 +71,7 @@ export interface LocalRecord {
   seq: number;
   /** true = まだサーバーへ送っていない */
   dirty: 0 | 1;
-  /**
-   * 平文の指紋（暗号ではないハッシュ）。
-   * 「中身が変わったか」を判定するために置く。これがあると
-   * 変更判定のたびに全レコードを復号する必要がなくなる。
-   * 指紋だけでは中身を復元できないため、端末内に置いても実害はない。
-   */
+  /** Keyed change-detection fingerprint; never an unkeyed plaintext digest. */
   hash?: string;
 }
 
@@ -89,6 +85,40 @@ export interface MediaChunkRow {
 }
 
 export const idb = {
+  /** Compare-and-swap the entire snapshot in one transaction; never clear first. */
+  async replaceRecords(before: LocalRecord[], after: LocalRecord[]): Promise<void> {
+    const db = await openDb();
+    await new Promise<void>((resolve, reject) => {
+      const t = db.transaction(STORE_RECORDS, "readwrite");
+      const s = t.objectStore(STORE_RECORDS);
+      const req = s.getAll();
+      let conflict = false;
+      req.onsuccess = () => {
+        const signature = (rows: LocalRecord[]) => JSON.stringify([...rows].sort((a,b) => a.id.localeCompare(b.id)));
+        if (signature(req.result) !== signature(before)) { conflict = true; t.abort(); return; }
+        s.clear();
+        after.forEach(r => s.put(r));
+      };
+      t.oncomplete = () => resolve();
+      t.onabort = () => reject(new Error(conflict ? "別の処理が保存内容を変更しました。再度お試しください" : "保存できませんでした。元データは保持されています"));
+      t.onerror = () => reject(t.error);
+    });
+  },
+  /** Atomic media replacement. Readers see the old complete file or the new one. */
+  async replaceMedia(mediaId: string, rows: MediaChunkRow[], removeTemp?: string): Promise<void> {
+    const db = await openDb();
+    await new Promise<void>((resolve, reject) => {
+      const t = db.transaction(STORE_MEDIA, "readwrite");
+      const s = t.objectStore(STORE_MEDIA);
+      for (const id of [mediaId, ...(removeTemp ? [removeTemp] : [])]) {
+        const r = s.index("mediaId").getAllKeys(id);
+        r.onsuccess = () => { r.result.forEach(k => s.delete(k)); if (id === mediaId) rows.forEach(row => s.put(row)); };
+      }
+      t.oncomplete = () => resolve();
+      t.onabort = () => reject(t.error ?? new Error("録画保存が中断されました"));
+      t.onerror = () => reject(t.error);
+    });
+  },
   async putRecord(r: LocalRecord): Promise<void> {
     await tx(STORE_RECORDS, "readwrite", (s) => s.put(r));
   },
@@ -101,6 +131,7 @@ export const idb = {
       rs.forEach((r) => s.put(r));
       t.oncomplete = () => resolve();
       t.onerror = () => reject(t.error);
+      t.onabort = () => reject(t.error ?? new Error("保存処理が中断されました"));
     });
   },
   getRecord(id: string): Promise<LocalRecord | undefined> {
@@ -140,6 +171,7 @@ export const idb = {
       t.objectStore(STORE_MEDIA).clear();
       t.oncomplete = () => resolve();
       t.onerror = () => reject(t.error);
+      t.onabort = () => reject(t.error ?? new Error("保存処理が中断されました"));
     });
   },
 
@@ -156,6 +188,7 @@ export const idb = {
       rows.forEach((r) => s.put(r));
       t.oncomplete = () => resolve();
       t.onerror = () => reject(t.error);
+      t.onabort = () => reject(t.error ?? new Error("保存処理が中断されました"));
     });
   },
   /**
@@ -202,6 +235,7 @@ export const idb = {
       rows.forEach((r) => s.delete(r.id));
       t.oncomplete = () => resolve();
       t.onerror = () => reject(t.error);
+      t.onabort = () => reject(t.error ?? new Error("保存処理が中断されました"));
     });
   },
 };

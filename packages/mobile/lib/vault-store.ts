@@ -13,6 +13,9 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { client } from "./api";
 import { open, seal, type Sealed } from "./vault-crypto";
 
+let verifiedGeneration: number | null = null;
+export function setVerifiedGeneration(value: number) { verifiedGeneration = value; }
+
 const CACHE_KEY = "cockpit.records.v1";
 const CURSOR_KEY = "cockpit.cursor.v1";
 const DEVICE_KEY = "cockpit.deviceId.v1";
@@ -152,7 +155,9 @@ export async function syncAndLoad(key: Uint8Array): Promise<{
     const dev = await deviceId();
     const since = Number((await AsyncStorage.getItem(CURSOR_KEY)) ?? 0);
     const dirty = rows.filter((r) => r.dirty);
+    if (verifiedGeneration == null) throw new Error("パスフレーズで解錠して鍵世代を確認してください");
     const res = await client.sync.push({
+      generation: verifiedGeneration,
       deviceId: dev,
       since,
       records: dirty.map((r) => ({
@@ -166,7 +171,7 @@ export async function syncAndLoad(key: Uint8Array): Promise<{
       })),
     });
     const accepted = new Set(res.accepted);
-    for (const r of dirty) if (accepted.has(r.id)) r.dirty = false;
+    for (const r of dirty) if (accepted.has(r.id)) { r.dirty = false; r.seq = res.acceptedVersions[r.id] ?? r.seq; }
     for (const c of res.changed) {
       byId.set(c.id, {
         id: c.id,
