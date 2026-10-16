@@ -65,12 +65,17 @@ export async function downloadXlsx(fileName: string, sheets: SheetSpec[]): Promi
   XLSX.writeFile(wb, fileName.endsWith(".xlsx") ? fileName : `${fileName}.xlsx`);
 }
 
-export function downloadCsv(fileName: string, head: string[], rows: (string | number)[][]): void {
+export function encodeCsv(head: string[], rows: (string | number)[][]): string {
   const esc = (v: string | number) => {
     const s = String(sanitizeSheetCell(v) ?? "");
-    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
   const csv = [head.map(esc).join(","), ...rows.map((r) => r.map(esc).join(","))].join("\r\n");
+  return csv;
+}
+
+export function downloadCsv(fileName: string, head: string[], rows: (string | number)[][]): void {
+  const csv = encodeCsv(head, rows);
   // Excel で開いたときに文字化けしないよう BOM を付ける
   const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" });
   const a = document.createElement("a");

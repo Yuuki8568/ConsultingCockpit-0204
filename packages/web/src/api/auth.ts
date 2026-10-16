@@ -15,6 +15,7 @@ export const auth = betterAuth({
   // 許可メールでも新規作成させない。既存アカウントのサインインだけ通す。
   emailAndPassword: { enabled: true, disableSignUp: true },
   secret: process.env.BETTER_AUTH_SECRET,
+  session: { expiresIn: 24 * 60 * 60, updateAge: 60 * 60, cookieCache: { enabled: false } },
   // 受け付ける相手先は名簿で決める（名乗ってきた先をそのまま許す形をやめた）。
   trustedOrigins: [...allowedOrigins(), "runable-consult-rjau47t://"],
   // 同じ相手からの連続した呼び出しに上限を設ける。

@@ -8,7 +8,7 @@
   "scripts": {
     "build": "tsc --noEmit && vite build",
     "dev": "vite",
-    "start": "bun src/__server.ts",
+    "start": "bun src/server.ts",
     "typecheck": "tsc --noEmit",
     "lint": "cd ../.. && oxlint packages/web --deny-warnings --no-error-on-unmatched-pattern",
     "preview": "bun run build && vite preview",
@@ -44,6 +44,7 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@playwright/test": "1.56.1",
     "@tailwindcss/vite": "^4.2.1",
     "@types/bun": "latest",
     "@types/jsdom": "^28.0.1",
@@ -52,6 +53,7 @@
     "@types/react-dom": "19.1.11",
     "@vitejs/plugin-react": "5.1.4",
     "drizzle-kit": "^0.31.10",
+    "fake-indexeddb": "^6.2.6",
     "jsdom": "^29.1.0",
     "sharp": "^0.34.5",
     "tailwindcss": "^4.2.1",

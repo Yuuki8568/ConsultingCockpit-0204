@@ -25,7 +25,6 @@ import {
   checkVerifier,
   deriveVaultKeys,
   newSalt,
-  seal,
 } from "../lib/crypto/vault-crypto";
 import { docViewer } from "../lib/store/doc-viewer-store";
 import {
@@ -123,7 +122,8 @@ export function VaultProvider({ children }: { children: ReactNode }) {
   const [secondsToLock, setSecondsToLock] = useState<number | null>(null);
   const [lockoutSeconds, setLockoutSeconds] = useState(() => lockoutRemainingSec());
   const lastActivityRef = useRef(Date.now());
-  const keyRef = useRef<CryptoKey | null>(null);
+  const unlockedRef = useRef(false);
+  const operationEpoch = useRef(0);
 
   // ---- ストアの購読 ----------------------------------------------
   useEffect(() => {
@@ -133,6 +133,10 @@ export function VaultProvider({ children }: { children: ReactNode }) {
       const next = vaultStore.getState();
       setState(next ? { ...next } : null);
       setRevision(vaultStore.getRevision());
+      if (!next && vaultStore.getStatus().state === "locked") {
+        unlockedRef.current = false;
+        setPhase(current => current === "signed-out" || current === "denied" ? current : "locked");
+      }
     });
     const un2 = vaultStore.subscribeStatus(() => setSync({ ...vaultStore.getStatus() }));
     return () => {
@@ -146,8 +150,8 @@ export function VaultProvider({ children }: { children: ReactNode }) {
     void (async () => {
       try {
         let payload: { payloadCiphertext?: string; payloadIv?: string } = {};
-        if (detail !== undefined && keyRef.current) {
-          const s = await seal(keyRef.current, detail);
+        if (detail !== undefined && unlockedRef.current) {
+          const s = await vaultStore.sealAudit(detail);
           payload = { payloadCiphertext: s.ciphertext, payloadIv: s.iv };
         }
         await client.audit.append({
@@ -166,7 +170,8 @@ export function VaultProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (sessionPending) return;
     if (!session) {
-      keyRef.current = null;
+      operationEpoch.current++;
+      unlockedRef.current = false;
       vaultStore.lock();
       setPhase("signed-out");
       return;
@@ -176,7 +181,7 @@ export function VaultProvider({ children }: { children: ReactNode }) {
     // 再実行される。ここで setPhase("locked") まで進むと、書類を開いている
     // 最中でも予告なく金庫が閉じてしまう（再現: 解錠後に online イベントを
     // 投げるだけでロック画面に戻る）。鍵を持っている間はフェーズを巻き戻さない。
-    if (keyRef.current) return;
+    if (unlockedRef.current) return;
     let cancelled = false;
     void (async () => {
       try {
@@ -194,7 +199,7 @@ export function VaultProvider({ children }: { children: ReactNode }) {
         if (cancelled) return;
         // 本人以外のアカウントは、ここから先へ進ませない
         if (isForbidden(e)) {
-          keyRef.current = null;
+          unlockedRef.current = false;
           vaultStore.lock();
           setPhase("denied");
           setError("この操作卓は本人専用です。許可されたアカウントでサインインしてください。");
@@ -214,18 +219,14 @@ export function VaultProvider({ children }: { children: ReactNode }) {
   const doLock = useCallback((reason: "manual" | "auto" = "manual") => {
     // 開いている書類の未保存分を先に金庫へ流し切ってから閉じる。
     // flush → mutate は同期的に state へ反映され、永続化はキューへ載る。
-    // flushPending でキューが空になるのを待ってから鍵を捨てる。
+    // 公開鍵参照・出力を直ちに無効化。受理済み編集の暗号化保存だけが完了まで続く。
+    operationEpoch.current++;
     docViewer.close();
     setPhase("locked");
     setLockWarning(false);
     setSecondsToLock(null);
-    void vaultStore
-      .flushPending()
-      .catch(() => undefined)
-      .finally(() => {
-        keyRef.current = null;
-        vaultStore.lock();
-      });
+    unlockedRef.current = false;
+    vaultStore.lock();
     void client.devices
       .logLogin({
         kind: reason === "manual" ? "manual_lock" : "auto_lock",
@@ -280,6 +281,7 @@ export function VaultProvider({ children }: { children: ReactNode }) {
   // ---- 操作 -------------------------------------------------------
   const createVault = useCallback(
     async (passphrase: string) => {
+      const operation = ++operationEpoch.current;
       setBusy(true);
       setError(null);
       try {
@@ -296,10 +298,13 @@ export function VaultProvider({ children }: { children: ReactNode }) {
           verifierCiphertext: verifier.ciphertext,
           verifierIv: verifier.iv,
         });
-        keyRef.current = vaultKey;
+        if (operation !== operationEpoch.current) throw new Error("操作が取り消されました");
+        unlockedRef.current = true;
         const initial = makeEmptyVaultState();
         await vaultStore.initializeEmpty(vaultKey, macKey, initial);
+        vaultStore.setBackupKdf(salt, SEC_CONFIG.KDF_ITERATIONS);
         resetFailures();
+        if (operation !== operationEpoch.current || !vaultStore.isUnlocked()) throw new Error("操作が取り消されました");
         setPhase("unlocked");
         lastActivityRef.current = Date.now();
         audit("vault_create");
@@ -321,6 +326,7 @@ export function VaultProvider({ children }: { children: ReactNode }) {
         );
         return false;
       }
+      const operation = ++operationEpoch.current;
       setBusy(true);
       setError(null);
       setPhase("unlocking");
@@ -359,9 +365,13 @@ export function VaultProvider({ children }: { children: ReactNode }) {
             .catch(() => undefined);
           return false;
         }
-        keyRef.current = vaultKey;
+        if (operation !== operationEpoch.current) throw new Error("操作が取り消されました");
+        unlockedRef.current = true;
         resetFailures();
+        vaultStore.setGeneration(p.generation);
         await vaultStore.unlock(vaultKey, macKey);
+        vaultStore.setBackupKdf(p.kdfSalt, p.kdfIterations);
+        if (operation !== operationEpoch.current || !vaultStore.isUnlocked()) throw new Error("操作が取り消されました");
         setPhase("unlocked");
         lastActivityRef.current = Date.now();
         void client.devices
@@ -375,6 +385,9 @@ export function VaultProvider({ children }: { children: ReactNode }) {
         audit("vault_unlock");
         return true;
       } catch (e) {
+        if (operation !== operationEpoch.current) return false;
+        unlockedRef.current = false;
+        vaultStore.lock();
         setPhase("locked");
         setError(e instanceof Error ? e.message : String(e));
         return false;
@@ -411,7 +424,8 @@ export function VaultProvider({ children }: { children: ReactNode }) {
 
   const signOut = useCallback(async () => {
     audit("signout");
-    keyRef.current = null;
+    operationEpoch.current++;
+    unlockedRef.current = false;
     vaultStore.lock();
     await authClient.signOut();
     setPhase("signed-out");

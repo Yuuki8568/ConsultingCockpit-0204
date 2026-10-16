@@ -42,7 +42,7 @@ async function assertDeviceActive(userId: string, deviceId: string) {
     .select()
     .from(schema.device)
     .where(and(eq(schema.device.userId, userId), eq(schema.device.id, deviceId)));
-  if (d?.revokedAtMs) {
+  if (!d || d.revokedAtMs) {
     throw new ORPCError("FORBIDDEN", {
       message: "この端末は失効しています。再度サインインしてください。",
     });
@@ -51,7 +51,7 @@ async function assertDeviceActive(userId: string, deviceId: string) {
     await db
       .update(schema.device)
       .set({ lastSeenAtMs: Date.now() })
-      .where(eq(schema.device.id, deviceId));
+      .where(and(eq(schema.device.userId, userId), eq(schema.device.id, deviceId)));
   }
 }
 
@@ -63,7 +63,8 @@ export const sync = {
         // 端末IDは必須。省略できると、失効させた端末が「端末IDを付けない」だけで
         // 失効判定を通り抜けてしまうため。
         deviceId: z.string().min(4).max(64),
-        since: z.number().int().default(0),
+        generation: z.number().int().min(1),
+        since: z.number().int().min(0).default(0),
         records: z.array(recordInput).max(500),
       }),
     )
@@ -71,8 +72,13 @@ export const sync = {
       const uid = context.user.id;
       await assertDeviceActive(uid, input.deviceId);
 
-      const [v] = await db.select().from(schema.vault).where(eq(schema.vault.userId, uid));
+      return db.transaction(async tx => {
+      const [v] = await tx.select().from(schema.vault).where(eq(schema.vault.userId, uid));
       if (!v) throw new ORPCError("NOT_FOUND", { message: "金庫が未作成です" });
+      if (v.generation !== input.generation) throw new ORPCError("CONFLICT", { message: "鍵が変更されました。再解錠してください" });
+      if (new Set(input.records.map(r => r.id)).size !== input.records.length) throw new ORPCError("BAD_REQUEST");
+      const [maximum] = await tx.select({ value: sql<number>`coalesce(max(${schema.record.seq}), 0)` }).from(schema.record).where(eq(schema.record.userId, uid));
+      let nextSeq = Math.max(Date.now(), Number(maximum?.value ?? 0));
 
       const conflicts: {
         id: string;
@@ -85,7 +91,7 @@ export const sync = {
 
       if (input.records.length > 0) {
         const ids = input.records.map((r) => r.id);
-        const existing = await db
+        const existing = await tx
           .select()
           .from(schema.record)
           .where(and(eq(schema.record.userId, uid), inArray(schema.record.id, ids)));
@@ -95,7 +101,7 @@ export const sync = {
         for (const r of input.records) {
           const cur = byId.get(r.id);
           if (!cur) {
-            await db.insert(schema.record).values({
+            await tx.insert(schema.record).values({
               id: r.id,
               userId: uid,
               type: r.type,
@@ -105,12 +111,12 @@ export const sync = {
               version: 1,
               deletedAt: r.deleted ? now : null,
               deviceId: input.deviceId,
-              seq: now,
+              seq: ++nextSeq,
             });
             accepted.push(r.id);
             continue;
           }
-          if (r.updatedAtMs > cur.updatedAtMs) {
+          if (r.baseSeq === cur.seq && r.type === cur.type) {
             // クライアントが新しい → 採用。
             // ただしサーバー版が「この端末が知らない変更」だったときだけ競合として返す。
             // 自分の1つ前の版を上書きしただけなら競合ではない。
@@ -124,7 +130,7 @@ export const sync = {
                 losingSide: "server",
               });
             }
-            await db
+            await tx
               .update(schema.record)
               .set({
                 ciphertext: r.ciphertext,
@@ -133,11 +139,11 @@ export const sync = {
                 version: cur.version + 1,
                 deletedAt: r.deleted ? now : null,
                 deviceId: input.deviceId,
-                seq: now,
+                seq: ++nextSeq,
               })
               .where(and(eq(schema.record.userId, uid), eq(schema.record.id, r.id)));
             accepted.push(r.id);
-          } else if (r.updatedAtMs < cur.updatedAtMs) {
+          } else if (r.ciphertext !== cur.ciphertext || r.iv !== cur.iv || r.deleted !== (cur.deletedAt != null)) {
             // サーバーが新しい → クライアント版が負け
             conflicts.push({
               id: r.id,
@@ -147,12 +153,13 @@ export const sync = {
               losingSide: "client",
             });
           }
-          // 同時刻・同内容は何もしない
+          else { accepted.push(r.id); }
+          // Identical retransmissions are acknowledged without rewriting.
         }
       }
 
       // pull: since より新しい行
-      const changed = await db
+      const changed = await tx
         .select()
         .from(schema.record)
         .where(and(eq(schema.record.userId, uid), gt(schema.record.seq, input.since)))
@@ -160,10 +167,29 @@ export const sync = {
         .limit(1000);
 
       const cursor = changed.length > 0 ? changed[changed.length - 1].seq : input.since;
+      const fullPage = changed.length === 1000;
+      // Old releases used millisecond timestamps: include ties at a page boundary.
+      if (fullPage) {
+        const ties = await tx.select().from(schema.record).where(and(eq(schema.record.userId, uid), eq(schema.record.seq, cursor)));
+        const seen = new Set(changed.map(r => r.id));
+        changed.push(...ties.filter(r => !seen.has(r.id)));
+      }
+      const conflictIds = conflicts.map(c => c.id);
+      if (conflictIds.length) {
+        const current = await tx.select().from(schema.record).where(and(eq(schema.record.userId, uid), inArray(schema.record.id, conflictIds)));
+        const seen = new Set(changed.map(r => r.id));
+        changed.push(...current.filter(r => !seen.has(r.id)));
+      }
+      const acceptedVersions: Record<string, number> = {};
+      if (accepted.length) {
+        const saved = await tx.select().from(schema.record).where(and(eq(schema.record.userId, uid), inArray(schema.record.id, accepted)));
+        for (const row of saved) acceptedVersions[row.id] = row.seq;
+      }
 
       return {
         generation: v.generation,
         accepted,
+        acceptedVersions,
         conflicts,
         changed: changed.map((c) => ({
           id: c.id,
@@ -176,8 +202,9 @@ export const sync = {
           seq: c.seq,
         })),
         cursor,
-        hasMore: changed.length === 1000,
+        hasMore: fullPage,
       };
+      });
     }),
 
   /** 初回・復旧用の全件取得。失効端末からは取得できない。 */

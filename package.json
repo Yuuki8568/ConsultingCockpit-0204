@@ -21,7 +21,11 @@
     "db:migrate": "turbo db:migrate",
     "db:push": "turbo db:push",
     "internal:check-conventions": "konsistent",
-    "internal:kill-port": "lsof -t -i :${PORT:-4200} | xargs kill -9"
+    "internal:kill-port": "lsof -t -i :${PORT:-4200} | xargs kill -9",
+    "test:security": "cd packages/web && bun test tests/security.test.ts",
+    "test:blackbox": "cd packages/web && node node_modules/@playwright/test/cli.js test",
+    "typecheck:security": "tsc --noEmit -p packages/web/tsconfig.app.json && tsc --noEmit -p packages/web/tsconfig.node.json",
+    "verify:security": "bun run typecheck:security && bun run test:security && bun run build:web && bun run test:blackbox"
   },
   "devDependencies": {
     "@tursodatabase/api": "^1.9.2",

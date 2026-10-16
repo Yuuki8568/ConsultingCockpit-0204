@@ -2,7 +2,7 @@ import { and, count, desc, eq, gte, ne } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "../database";
 import * as schema from "../database/schema";
-import { authed } from "../middleware/auth";
+import { authed, recentlyAuthed } from "../middleware/auth";
 
 /** 端末管理とログイン履歴。v3 のログイン履歴に「端末の失効」を追加したもの。 */
 export const devices = {
@@ -80,7 +80,7 @@ export const devices = {
       return { ok: true };
     }),
 
-  unrevoke: authed
+  unrevoke: recentlyAuthed
     .input(z.object({ id: z.string() }))
     .handler(async ({ context, input }) => {
       await db

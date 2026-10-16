@@ -17,7 +17,7 @@
  * こうすると1案件を直しただけで全データを送り直すことがなくなる。
  */
 import type { CaseRecord, LeadRecord, VaultState } from "../../domain/types";
-import { normalizeVaultState } from "../../domain/logic/state";
+import { assertUniqueImportIds, normalizeVaultState } from "../../domain/logic/state";
 import { client } from "../api";
 import {
   hmacHex,
@@ -38,6 +38,10 @@ export interface SyncStatus {
   lastSyncedAtMs: number | null;
   lastError: string | null;
   conflicts: number;
+}
+
+async function digestBytes(bytes: ArrayBuffer): Promise<string> {
+  return Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)), b => b.toString(16).padStart(2, "0")).join("");
 }
 
 const META_CURSOR = "syncCursor";
@@ -163,6 +167,38 @@ export function assembleState(
 type Listener = () => void;
 
 export class VaultStore {
+  private epoch = 0;
+  private rekeying = false;
+  private releaseWriter: (() => void) | null = null;
+  private async acquireWriter(): Promise<void> {
+    if (this.releaseWriter) return;
+    if (typeof navigator === "undefined" || !navigator.locks)
+      throw new Error("安全な複数タブ制御に対応するブラウザで開いてください");
+    await new Promise<void>((resolve, reject) => {
+      void navigator.locks.request("cockpit-v4-writer", { ifAvailable: true }, async lock => {
+        if (!lock) { reject(new Error("別タブで金庫が開いています。先に施錠してください")); return; }
+        await new Promise<void>(release => { this.releaseWriter = release; resolve(); });
+      }).catch(reject);
+    });
+  }
+  private generation = 1;
+  setGeneration(value: number) { this.generation = value; }
+  private backupKdf: { salt: string; iterations: number } | null = null;
+  setBackupKdf(salt: string, iterations: number): void { this.backupKdf = { salt, iterations }; }
+  getBackupKdf() {
+    if (!this.isUnlocked() || !this.backupKdf) throw new Error("バックアップの鍵情報がありません。再度解錠してください");
+    return { ...this.backupKdf };
+  }
+  private assertSession(epoch: number): void {
+    if (!this.key || epoch !== this.epoch) throw new Error("金庫の状態が変わりました。再度解錠してください");
+  }
+  async sealAudit(value: unknown): Promise<Sealed> {
+    const epoch = this.epoch;
+    if (!this.key) throw new Error("金庫が施錠されています");
+    const result = await seal(this.key, value);
+    this.assertSession(epoch);
+    return result;
+  }
   private key: CryptoKey | null = null;
   /** 平文の指紋（HMAC）を作るための鍵。メモリ上にだけ置く */
   private macKey: CryptoKey | null = null;
@@ -264,19 +300,33 @@ export class VaultStore {
   // ---- 解錠・施錠 --------------------------------------------------
   /** 金庫鍵を受け取り、サーバー＋ローカルから状態を復元する */
   async unlock(key: CryptoKey, macKey: CryptoKey): Promise<void> {
+    const epoch = ++this.epoch;
+    await this.flushPending();
+    await this.acquireWriter();
+    if (epoch !== this.epoch) throw new Error("解錠が取り消されました");
     this.key = key;
     this.macKey = macKey;
     this.setStatus({ state: "syncing", lastError: null });
     // まずローカルの暗号文で即座に開く（オフラインでも起動できる）
+    await this.recoverRekey();
     await this.rebuildFromLocal();
+    this.assertSession(epoch);
     this.setStatus({ state: this.online ? "idle" : "offline" });
     // 鍵変更の途中で止まった録画チャンクがあれば、ここで結末を付ける
     await this.settleMediaRekey();
     // 続けてサーバーと同期
+    this.assertSession(epoch);
     if (this.online) void this.sync();
   }
 
   lock(): void {
+    this.epoch++;
+    const release = this.releaseWriter;
+    this.releaseWriter = null;
+    void this.opQueue.finally(() => release?.());
+    if (this.syncTimer) clearTimeout(this.syncTimer);
+    this.syncTimer = null;
+    this.backupKdf = null;
     this.key = null;
     this.macKey = null;
     this.state = null;
@@ -297,33 +347,52 @@ export class VaultStore {
 
   /** 新規金庫：空の状態を作って保存する */
   async initializeEmpty(key: CryptoKey, macKey: CryptoKey, initial: VaultState): Promise<void> {
+    const epoch = ++this.epoch;
+    await this.acquireWriter();
+    if (epoch !== this.epoch) throw new Error("操作が取り消されました");
     this.key = key;
     this.macKey = macKey;
     this.state = initial;
     await this.persistAll(initial);
+    this.assertSession(epoch);
     this.emit();
     this.setStatus({ state: this.online ? "idle" : "offline" });
     if (this.online) await this.sync();
   }
 
   private async rebuildFromLocal(): Promise<void> {
-    if (!this.key) return;
+    const key = this.key;
+    const epoch = this.epoch;
+    if (!key) return;
     const rows = await idb.allRecords();
     const parts: { id: string; type: string; value: unknown }[] = [];
-    let unreadable = 0;
     for (const r of rows) {
-      if (r.deleted) continue;
-      try {
-        parts.push({ id: r.id, type: r.type, value: await openRecord(this.key, r) });
-      } catch {
-        unreadable++;
+      if (r.deleted || r.id.includes("__conflict")) continue;
+      let value: unknown;
+      try { value = await openRecord(key, r); }
+      catch {
+        this.assertSession(epoch);
+        this.lock();
+        throw new Error("復号できない原本があります。データは保持されており、編集・同期を停止しました。復旧前に保存領域を消去しないでください");
       }
+      this.assertSession(epoch);
+      if ((r.type === "case" || r.type === "lead") &&
+          (!value || typeof value !== "object" || !("id" in value) || r.id !== `${r.type}:${value.id}`)) {
+        this.lock();
+        throw new Error("レコードIDが一致しません。原本を保持して停止しました");
+      }
+      parts.push({ id: r.id, type: r.type, value });
     }
-    if (unreadable > 0 && parts.length === 0 && rows.length > 0) {
-      // 全件開けない = 別のパスフレーズの金庫のローカル残骸。捨てて取り直す。
-      await idb.clearRecords();
-      await idb.setMeta(META_CURSOR, 0);
-    }
+    this.assertSession(epoch);
+    const fingerprints = new Map<string, string>();
+    for (const p of parts) fingerprints.set(p.id, await this.fingerprint(JSON.stringify(p.value)));
+    this.assertSession(epoch);
+    const upgraded = rows.map(r => {
+      const { hash: _oldHash, ...rest } = r;
+      return fingerprints.has(r.id) ? { ...rest, hash: fingerprints.get(r.id) } : rest;
+    });
+    if (JSON.stringify(rows) !== JSON.stringify(upgraded)) await idb.replaceRecords(rows, upgraded);
+    this.assertSession(epoch);
     this.state = assembleState(parts);
     this.emit();
   }
@@ -335,12 +404,17 @@ export class VaultStore {
    * 構造も深いので、まるごと差し替えるより現物を編集するほうが速い）
    */
   async mutate(fn: (s: VaultState) => void, touched?: string[]): Promise<void> {
-    if (!this.state || !this.key) return;
+    if (!this.state || !this.key || this.rekeying) throw new Error("金庫が施錠中または鍵変更中です");
     // 画面反映は待たせないので fn と emit は同期的に行い、
     // 永続化だけをキューに載せる（同期処理と衝突させないため）。
     fn(this.state);
     this.emit();
-    await this.enqueue(() => this.persistPartial(this.state!, touched));
+    const snapshot = structuredClone(this.state);
+    const key = this.key;
+    const macKey = this.macKey!;
+    // An already accepted edit may finish encrypted local persistence after lock.
+    // No public key/state is retained and no network operation is required.
+    await this.enqueue(() => this.persistPartial(snapshot, touched, key, macKey));
     this.scheduleSync();
   }
 
@@ -379,21 +453,22 @@ export class VaultStore {
    * 指紋は HMAC（金庫を解錠しないと作れない）なので、
    * 保存領域だけを読む相手は指紋の一致から中身の候補を確かめられない。
    */
-  private async persistPartial(state: VaultState, touched?: string[]): Promise<void> {
-    if (!this.key) return;
+  private async persistPartial(state: VaultState, touched: string[] | undefined, key: CryptoKey, macKey: CryptoKey): Promise<void> {
+    assertUniqueImportIds(state);
     const parts = splitState(state);
     const now = Date.now();
     const rows: LocalRecord[] = [];
     const force = touched && touched.length > 0 ? new Set(touched) : null;
-    const existing = new Map((await idb.allRecords()).map((r) => [r.id, r]));
+    const before = await idb.allRecords();
+    const existing = new Map(before.map((r) => [r.id, r]));
 
     for (const p of parts) {
       const prev = existing.get(p.id);
       const json = JSON.stringify(p.value);
-      const hash = await this.fingerprint(json);
+      const hash = await hmacHex(macKey, json);
       // 指紋が同じで、削除されておらず、明示指定もなければ触らない
       if (prev && prev.hash === hash && !prev.deleted && !(force && force.has(p.id))) continue;
-      const sealed = await seal(this.key, p.value, recordAad(p.type, p.id));
+      const sealed = await seal(key, p.value, recordAad(p.type, p.id));
       rows.push({
         id: p.id,
         type: p.type,
@@ -417,49 +492,56 @@ export class VaultStore {
       }
     }
 
-    if (rows.length > 0) await idb.putRecords(rows);
+    if (rows.length > 0) {
+      for (const row of rows) existing.set(row.id, row);
+      await idb.replaceRecords(before, [...existing.values()]);
+    }
     const pending = (await idb.dirtyRecords()).length;
     this.setStatus({ pending });
   }
 
   /** 状態をまるごと差し替える（v3 JSON 取込・復元） */
   async replaceState(state: VaultState): Promise<void> {
-    if (!this.key) return;
-    // 置き換えで消えたレコードは「削除した」印を付けて送る。
-    // これをしないと、次の同期でサーバーに残った古い案件が戻ってきてしまう。
-    // idb の全消去＋全書き込みを同期処理と並行させないようキューに載せる。
+    if (!this.isUnlocked() || this.rekeying) throw new Error("金庫が施錠中または鍵変更中です");
+    assertUniqueImportIds(state);
+    const snapshot = structuredClone(state);
+    const key = this.key!;
+    const macKey = this.macKey!;
+    const epoch = this.epoch;
     await this.enqueue(async () => {
+      this.assertSession(epoch);
       const before = await idb.allRecords();
-      this.state = state;
-      await idb.clearRecords();
-      await this.persistAll(state);
-      const after = new Set((await idb.allRecords()).map((r) => r.id));
-      const now = Date.now();
-      const tombstones = before
-        .filter((r) => !after.has(r.id) && !r.deleted)
-        .map((r) => ({
-          ...r,
-          ciphertext: "",
-          iv: "",
-          updatedAtMs: now,
-          deleted: true,
-          dirty: 1 as const,
-          hash: "0",
-        }));
-      if (tombstones.length > 0) await idb.putRecords(tombstones);
+      const rows = new Map(before.map(r => [r.id, r]));
+      const alive = new Set<string>();
+      for (const p of splitState(snapshot)) {
+        alive.add(p.id);
+        const sealed = await seal(key, p.value, recordAad(p.type, p.id));
+        rows.set(p.id, { id: p.id, type: p.type, ...sealed, updatedAtMs: Date.now(),
+          deleted: false, seq: rows.get(p.id)?.seq ?? 0, dirty: 1,
+          hash: await hmacHex(macKey, JSON.stringify(p.value)) });
+      }
+      for (const r of before) {
+        if (!alive.has(r.id) && !r.id.includes("__conflict") && !r.deleted)
+          rows.set(r.id, { ...r, deleted: true, dirty: 1, updatedAtMs: Date.now() });
+      }
+      this.assertSession(epoch);
+      await idb.replaceRecords(before, [...rows.values()]);
+      this.assertSession(epoch);
+      this.state = snapshot;
+      this.emit();
     });
-    this.emit();
-    await this.sync();
+    this.scheduleSync();
   }
 
   // ---- 同期 -------------------------------------------------------
   private scheduleSync(delayMs = 1200) {
+    if (!this.isUnlocked()) return;
     if (this.syncTimer) clearTimeout(this.syncTimer);
     this.syncTimer = setTimeout(() => void this.sync(), delayMs);
   }
 
   async sync(): Promise<void> {
-    if (!this.key || this.syncing) return;
+    if (!this.key || this.syncing || this.rekeying) return;
     if (!this.online) {
       this.setStatus({ state: "offline" });
       return;
@@ -470,7 +552,7 @@ export class VaultStore {
       await this.enqueue(() => this.syncCritical());
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      this.setStatus({ state: "error", lastError: msg });
+      if (this.key) this.setStatus({ state: "error", lastError: msg });
     } finally {
       this.syncing = false;
     }
@@ -486,6 +568,7 @@ export class VaultStore {
    */
   private async syncCritical(): Promise<void> {
     const key = this.key;
+    const epoch = this.epoch;
     if (!key) return;
     {
       const revBefore = this.revision;
@@ -504,7 +587,9 @@ export class VaultStore {
       const since = (await idb.getMeta<number>(META_CURSOR)) ?? 0;
       const deviceId = deviceIdFor();
 
+      this.assertSession(epoch);
       const res = await client.sync.push({
+        generation: this.generation,
         deviceId,
         since,
         records: dirty.map((r) => ({
@@ -517,13 +602,14 @@ export class VaultStore {
           // この編集が元にしたサーバー版。これが一致していれば競合扱いにしない。
           baseSeq: r.seq,
         })),
-      });
+      }, { signal: AbortSignal.timeout(15000) });
 
+      this.assertSession(epoch);
       // 送信できたものは dirty を落とす
       const acceptedSet = new Set(res.accepted);
       const cleared: LocalRecord[] = dirty
         .filter((r) => acceptedSet.has(r.id))
-        .map((r) => ({ ...r, dirty: 0 as const }));
+        .map((r) => ({ ...r, seq: res.acceptedVersions[r.id] ?? r.seq, dirty: 0 as const }));
       if (cleared.length > 0) await idb.putRecords(cleared);
 
       // 自分の後ろに溜まっている書き込み（= まだ idb に反映されていない編集）
@@ -586,8 +672,10 @@ export class VaultStore {
           try {
             hash = await this.fingerprint(JSON.stringify(await openRecord(key, c)));
           } catch {
+            if (!c.deleted) throw new Error("受信データを復号できません。ローカル原本は保持されています");
             hash = undefined;
           }
+          this.assertSession(epoch);
           incoming.push({
             id: c.id,
             type: c.type,
@@ -647,43 +735,73 @@ export class VaultStore {
     blob: Blob,
     onProgress?: (doneBytes: number, totalBytes: number) => void,
   ): Promise<number> {
-    if (!this.key) throw new Error("金庫が施錠されています");
-    const CHUNK = 8 * 1024 * 1024; // 8MiB
-    const total = blob.size;
-    let offset = 0;
-    let index = 0;
-    while (offset < total) {
-      const part = await blob.slice(offset, offset + CHUNK).arrayBuffer();
-      const sealed = await sealBytes(this.key, part, mediaAad(mediaId, index));
-      await idb.putMediaChunk({
-        id: `${mediaId}:${index}`,
-        mediaId,
-        index,
-        iv: sealed.iv,
-        data: sealed.data,
-      });
-      offset += CHUNK;
-      index += 1;
-      onProgress?.(Math.min(offset, total), total);
+    const key = this.key;
+    const epoch = this.epoch;
+    if (!key) throw new Error("金庫が施錠されています");
+    const CHUNK = 8 * 1024 * 1024;
+    const rows: MediaChunkRow[] = [];
+    const hashes: string[] = [];
+    for (let offset = 0, index = 0; offset < blob.size; offset += CHUNK, index++) {
+      const plain = await blob.slice(offset, offset + CHUNK).arrayBuffer();
+      hashes.push(await digestBytes(plain));
+      const sealed = await sealBytes(key, plain, mediaAad(mediaId, index));
+      this.assertSession(epoch);
+      rows.push({ id: `${mediaId}:${index}`, mediaId, index, ...sealed });
+      onProgress?.(Math.min(offset + CHUNK, blob.size), blob.size);
     }
-    return index;
+    const manifest = new TextEncoder().encode(JSON.stringify({ format: 1, mediaId,
+      count: rows.length, size: blob.size, hashes }));
+    const sealed = await sealBytes(key, manifest.buffer, mediaAad(mediaId, -1));
+    rows.push({ id: `${mediaId}:-1`, mediaId, index: -1, ...sealed });
+    this.assertSession(epoch);
+    await idb.replaceMedia(mediaId, rows);
+    this.assertSession(epoch);
+    return hashes.length;
   }
 
-  /** チャンクを開いてつなぎ、再生・ダウンロード用の Blob を返す */
+  /** A manifest authenticates completeness as well as the individual chunks. */
   async readMediaBlob(mediaId: string, mimeType: string): Promise<Blob> {
-    if (!this.key) throw new Error("金庫が施錠されています");
+    const key = this.key;
+    const epoch = this.epoch;
+    if (!key) throw new Error("金庫が施錠されています");
     const rows = await idb.mediaChunks(mediaId);
-    if (rows.length === 0) throw new Error("録画データがこの端末にありません");
-    const parts: ArrayBuffer[] = [];
-    for (const r of rows) {
-      parts.push(
-        await openBytes(this.key, { iv: r.iv, data: r.data }, mediaAad(mediaId, r.index), true),
-      );
+    const manifestRow = rows.find(r => r.index === -1);
+    if (!manifestRow) {
+      const meta = this.state?.cases.flatMap(c => c.recordings ?? []).find(m => m.id === mediaId);
+      if (!meta || rows.length !== meta.chunkCount) throw new Error("録画の台帳またはチャンクが不足しています。原本は保持されています");
+      const parts: ArrayBuffer[] = [];
+      for (const [index, row] of rows.entries()) {
+        if (row.index !== index) throw new Error("録画のチャンク順序が不正です");
+        parts.push(await openBytes(key, row, mediaAad(mediaId, index), true));
+        this.assertSession(epoch);
+      }
+      const blob = new Blob(parts, { type: mimeType });
+      if (blob.size !== meta.size) throw new Error("録画サイズが台帳と一致しません");
+      // Legacy data remains untouched; new writes always use a manifest.
+      return blob;
     }
-    return new Blob(parts, { type: mimeType });
+    const manifest = JSON.parse(new TextDecoder().decode(await openBytes(key,
+      manifestRow, mediaAad(mediaId, -1))));
+    const chunks = rows.filter(r => r.index !== -1);
+    if (manifest.format !== 1 || manifest.mediaId !== mediaId || manifest.count !== chunks.length ||
+        !Array.isArray(manifest.hashes) || manifest.hashes.length !== chunks.length)
+      throw new Error("録画のチャンクが不足または不正です");
+    const parts: ArrayBuffer[] = [];
+    for (const [index, row] of chunks.entries()) {
+      if (row.index !== index || row.id !== `${mediaId}:${index}`) throw new Error("録画の順序が不正です");
+      const plain = await openBytes(key, row, mediaAad(mediaId, index));
+      this.assertSession(epoch);
+      if (await digestBytes(plain) !== manifest.hashes[index]) throw new Error("録画の内容が一致しません");
+      parts.push(plain);
+    }
+    this.assertSession(epoch);
+    const blob = new Blob(parts, { type: mimeType });
+    if (blob.size !== manifest.size) throw new Error("録画のサイズが一致しません");
+    return blob;
   }
 
   async deleteMediaBlob(mediaId: string): Promise<void> {
+    if (!this.isUnlocked()) throw new Error("金庫が施錠されています");
     await idb.deleteMediaChunks(mediaId);
     // 鍵変更の途中に置いた仮チャンクがあれば、それも消す
     await idb.deleteMediaChunks(mediaId + REKEY_TEMP_SUFFIX);
@@ -692,6 +810,7 @@ export class VaultStore {
   /** 競合コピーを読む（差分確認画面用） */
   async listConflicts(): Promise<{ id: string; at: number; value: unknown }[]> {
     if (!this.key) return [];
+    const epoch = this.epoch;
     const all = await idb.allRecords();
     const out: { id: string; at: number; value: unknown }[] = [];
     for (const r of all) {
@@ -702,6 +821,7 @@ export class VaultStore {
         /* 開けないものは飛ばす */
       }
     }
+    this.assertSession(epoch);
     return out.sort((a, b) => b.at - a.at);
   }
 
@@ -719,6 +839,7 @@ export class VaultStore {
 
   /** 現在の状態をそのまま JSON にする（バックアップ書き出し用・平文） */
   exportJson(): string {
+    if (!this.isUnlocked()) throw new Error("金庫が施錠されています");
     return JSON.stringify(
       { app: "consulting-cockpit", version: 4, exportedAt: new Date().toISOString(), state: this.state },
       null,
@@ -734,51 +855,52 @@ export class VaultStore {
    */
   async sealBackup(value: unknown): Promise<Sealed> {
     if (!this.key) throw new Error("金庫が施錠されています");
-    return seal(this.key, value, "cc4-backup");
+    const epoch = this.epoch;
+    const result = await seal(this.key, value, "cc4-backup");
+    this.assertSession(epoch);
+    return result;
   }
 
   async openBackup<T = unknown>(sealed: Sealed): Promise<T> {
     if (!this.key) throw new Error("金庫が施錠されています");
-    return open<T>(this.key, sealed, "cc4-backup");
+    const epoch = this.epoch;
+    const result = await open<T>(this.key, sealed, "cc4-backup");
+    this.assertSession(epoch);
+    return result;
   }
 
-  /**
-   * パスフレーズ変更（鍵の切り替え）は3段階で行う。
-   *
-   *   1. prepareReencrypt … 新しい鍵で封じ直したものを用意する。
-   *      レコードはメモリ上に、録画は IndexedDB の仮チャンク（__rekey__）に置く。
-   *      この段階では今の鍵もデータも一切変わらない。
-   *   2. サーバーの vault.rekey … 検証トークンと全レコードを1トランザクションで差し替える。
-   *      ここが失敗したら abortReencrypt で仮チャンクを捨てるだけで元のまま。
-   *   3. commitReencrypt … ローカルへ書き戻し、仮チャンクを正式に採用し、鍵を切り替える。
-   *
-   * 途中で止まっても（通信失敗・クラッシュ・容量不足）、次回の解錠時に
-   * settleMediaRekey が仮チャンクの結末を付ける:
-   * 今の鍵で開けるなら採用（= サーバー側は切り替わっていた）、
-   * 開けないなら破棄（= 切り替わっていなかった）。
-   */
+  /** Stage encrypted records/media and a durable journal before the idempotent server request.
+   * Never infer rollback from a lost response. Unlock resumes the journal using the new key. */
   async prepareReencrypt(
     newKey: CryptoKey,
     newMacKey: CryptoKey,
     onProgress?: (label: string) => void,
   ): Promise<RekeyPrepared> {
     if (!this.key) throw new Error("金庫が施錠されています");
-    const oldKey = this.key;
+    if (this.rekeying || await idb.getMeta("rekeyJournal")) throw new Error("未完了の鍵変更があります。再解錠して復旧してください");
+    await this.sync();
+    await this.flushPending();
+    if ((await idb.dirtyRecords()).length) throw new Error("未同期の編集があります。同期を完了してから変更してください");
+    this.rekeying = true;
+    const oldKey = this.key!;
+    const epoch = this.epoch;
 
     // レコード：開いて新しい鍵で封じ直す（まだ書き込まない）
     const all = await idb.allRecords();
-    const records: { id: string; ciphertext: string; iv: string }[] = [];
+    const records: { id: string; ciphertext: string; iv: string; baseSeq: number }[] = [];
     const rows: LocalRecord[] = [];
     for (const r of all) {
+      if (r.deleted || r.id.includes("__conflict")) continue;
       let plain: unknown;
       try {
         plain = await openRecord(oldKey, r);
       } catch {
-        continue;
+        throw new Error("復号できない原本があるため鍵変更を停止しました");
       }
+      this.assertSession(epoch);
       const aad = aadForRow(r);
       const sealed: Sealed = await seal(newKey, plain, aad);
-      records.push({ id: r.id, ciphertext: sealed.ciphertext, iv: sealed.iv });
+      records.push({ id: r.id, ciphertext: sealed.ciphertext, iv: sealed.iv, baseSeq: r.seq });
       rows.push({
         ...r,
         ciphertext: sealed.ciphertext,
@@ -809,7 +931,16 @@ export class VaultStore {
       }
       await idb.putMediaChunks(tempRows);
     }
-    return { records, rows, mediaIds };
+    this.assertSession(epoch);
+    const prepared = { records, rows, mediaIds, before: all, generation: this.generation };
+    await idb.setMeta("rekeyJournal", { ...prepared, marker: await seal(newKey, "rekey-ready", "cc4-rekey-journal") });
+    return prepared;
+  }
+
+  async saveRekeyRequest(request: Parameters<typeof client.vault.rekey>[0]): Promise<void> {
+    const journal = await idb.getMeta<Record<string, unknown>>("rekeyJournal");
+    if (!journal) throw new Error("鍵変更の復旧情報がありません");
+    await idb.setMeta("rekeyJournal", { ...journal, request });
   }
 
   /** サーバー側の切り替えが成功したあとに呼ぶ。ローカルを新しい鍵へ切り替える */
@@ -818,31 +949,59 @@ export class VaultStore {
     newMacKey: CryptoKey,
     prepared: RekeyPrepared,
   ): Promise<void> {
-    await idb.putRecords(prepared.rows);
-    for (const mediaId of prepared.mediaIds) {
-      await this.adoptMediaTemps(mediaId);
-    }
+    if (!this.key) throw new Error("再度解錠して鍵変更を復旧してください");
+    const epoch = this.epoch;
+    await this.applyRekey(prepared);
+    this.assertSession(epoch);
+    this.epoch++;
     this.key = newKey;
     this.macKey = newMacKey;
+    this.generation = prepared.generation + 1;
+    this.rekeying = false;
   }
 
-  /** サーバー側の切り替えが失敗したときに呼ぶ。仮チャンクを捨てて元のままにする */
+  /** A transport error cannot prove a server rollback. Preserve both encrypted versions. */
   async abortReencrypt(): Promise<void> {
-    const ids = await idb.listMediaIds();
-    for (const id of ids) {
-      if (id.endsWith(REKEY_TEMP_SUFFIX)) await idb.deleteMediaChunks(id);
+    this.lock();
+    this.rekeying = false;
+  }
+
+  private async applyRekey(prepared: RekeyPrepared): Promise<void> {
+    // Journal remains until every step is durable, so interrupted adoption is resumable.
+    const current = await idb.allRecords();
+    const newById = new Map(prepared.rows.map(r => [r.id, r]));
+    const expected = new Map(prepared.before.map(r => [r.id, r]));
+    for (const row of current) {
+      if (JSON.stringify(row) !== JSON.stringify(expected.get(row.id)) &&
+          JSON.stringify(row) !== JSON.stringify(newById.get(row.id)))
+        throw new Error("別タブの変更を検知しました。復旧原本は保持されています");
     }
+    for (const mediaId of prepared.mediaIds) await this.adoptMediaTemps(mediaId);
+    await idb.replaceRecords(current, current.map(row => newById.get(row.id) ?? row));
+    await idb.setMeta("lastRekeyRecovery", prepared);
+    await idb.setMeta("rekeyJournal", null);
+  }
+
+  private async recoverRekey(): Promise<void> {
+    const journal = await idb.getMeta<RekeyPrepared & { marker: Sealed; request?: Parameters<typeof client.vault.rekey>[0] }>("rekeyJournal");
+    if (!journal) return;
+    if (!this.key) throw new Error("金庫が施錠されています");
+    try { await open(this.key, journal.marker, "cc4-rekey-journal"); }
+    catch {
+      if (journal.request && this.generation === journal.generation) {
+        await client.vault.rekey(journal.request, { signal: AbortSignal.timeout(15000) });
+      }
+      throw new Error("未完了の鍵変更を再送しました。変更先の新パスフレーズで再解錠してください。旧原本と復旧情報は保持されています");
+    }
+    await this.applyRekey(journal);
+    this.rekeying = false;
   }
 
   /** 仮チャンクを正式に採用する（元のチャンクを消して名前を戻す） */
   private async adoptMediaTemps(mediaId: string): Promise<void> {
     const temps = await idb.mediaChunks(mediaId + REKEY_TEMP_SUFFIX);
     if (temps.length === 0) return;
-    await idb.deleteMediaChunks(mediaId);
-    await idb.putMediaChunks(
-      temps.map((t) => ({ ...t, id: `${mediaId}:${t.index}`, mediaId })),
-    );
-    await idb.deleteMediaChunks(mediaId + REKEY_TEMP_SUFFIX);
+    await idb.replaceMedia(mediaId, temps.map((t) => ({ ...t, id: `${mediaId}:${t.index}`, mediaId })), mediaId + REKEY_TEMP_SUFFIX);
   }
 
   /**
@@ -851,36 +1010,18 @@ export class VaultStore {
    * → 仮チャンクを採用する。開けない = 切り替わっていない → 仮チャンクを捨てる。
    */
   private async settleMediaRekey(): Promise<void> {
-    if (!this.key) return;
     const ids = await idb.listMediaIds();
-    for (const tempId of ids) {
-      if (!tempId.endsWith(REKEY_TEMP_SUFFIX)) continue;
-      const mediaId = tempId.slice(0, -REKEY_TEMP_SUFFIX.length);
-      const temps = await idb.mediaChunks(tempId);
-      if (temps.length === 0) continue;
-      let adoptable = false;
-      try {
-        await openBytes(
-          this.key,
-          { iv: temps[0].iv, data: temps[0].data },
-          mediaAad(mediaId, temps[0].index),
-        );
-        adoptable = true;
-      } catch {
-        adoptable = false;
-      }
-      if (adoptable) {
-        await this.adoptMediaTemps(mediaId);
-      } else {
-        await idb.deleteMediaChunks(tempId);
-      }
-    }
+    if (ids.some(id => id.endsWith(REKEY_TEMP_SUFFIX)))
+      throw new Error("旧版の鍵変更一時データがあります。原本を消去せず、復旧確認を行ってください");
   }
+
 }
 
 /** prepareReencrypt の結果 */
 export interface RekeyPrepared {
-  records: { id: string; ciphertext: string; iv: string }[];
+  records: { id: string; ciphertext: string; iv: string; baseSeq: number }[];
+  before: LocalRecord[];
+  generation: number;
   rows: LocalRecord[];
   mediaIds: string[];
 }
