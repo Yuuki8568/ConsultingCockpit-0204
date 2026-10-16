@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<style>
+  @page { size: A4; margin: 20mm 16mm 18mm 16mm;
+    @bottom-center { content: counter(page) " / " counter(pages); font-size: 8.5pt; color: #888; font-family: "Noto Sans CJK JP"; } }
+  * { box-sizing: border-box; }
+  body { font-family: "Noto Sans CJK JP", sans-serif; color: #1c1a17; font-size: 9.5pt; line-height: 1.7; margin: 0; }
+  h1 { font-size: 19pt; margin: 0 0 2mm 0; }
+  h2 { font-size: 13pt; margin: 8mm 0 2mm 0; padding: 1.5mm 3mm; background: #0C0C0C; color: #fff; border-radius: 2px; }
+  h3 { font-size: 10.5pt; margin: 4.5mm 0 1.5mm 0; border-left: 4px solid #C44D03; padding-left: 2.5mm; }
+  p { margin: 1.2mm 0; }
+  ul { margin: 1mm 0 2mm 0; padding-left: 5.5mm; }
+  li { margin: 0.5mm 0; }
+  table { border-collapse: collapse; width: 100%; margin: 2mm 0 3mm 0; font-size: 8.3pt; }
+  th, td { border: 1px solid #c9c4bc; padding: 1.3mm 1.8mm; text-align: left; vertical-align: top; }
+  th { background: #f1ede6; font-weight: 700; }
+  .cover .sub { color: #666; font-size: 10.5pt; margin-top: 1mm; }
+  .meta { background: #f7f5f1; border: 1px solid #ddd8cf; padding: 3mm 4mm; font-size: 8.5pt; color: #444; margin-top: 5mm; }
+  .ok { color: #1e7a3c; font-weight: 700; }
+  .ng { color: #b3341e; font-weight: 700; }
+  .warn { color: #9a6a00; font-weight: 700; }
+  .small { font-size: 8.3pt; color: #666; }
+  .avoid-break { page-break-inside: avoid; }
+  code { font-family: "Noto Sans Mono CJK JP", monospace; font-size: 8pt; background:#f3f1ec; padding: 0 1mm; border-radius: 2px; }
+</style>
+</head>
+<body>
+
+<div class="cover">
+  <h1>Consulting Cockpit v4<br>セキュリティ検証 報告書</h1>
+  <div class="sub">外部からの侵入試験と、内部の防御機能の動作確認</div>
+  <div class="small">実施日：2026年8月13日〜14日　／　対象：開発環境（localhost:4200 ほか）</div>
+</div>
+
+<div class="meta">
+この報告書は、実際に開発環境へリクエストを送って挙動を確かめた結果をまとめたものです。「実施した試験と結果」「見つかった弱点」「直した弱点」「残るリスク」「未検証の範囲」を分けて記載しています。試していない事項を「確認済み」とは書いていません。暗号化の強度の数値は実装の設定値に基づきます。
+</div>
+
+<h2>1. 試験の進め方</h2>
+<ul>
+  <li>対象は開発環境（Web: localhost:4200）。本番公開環境ではありません。</li>
+  <li>試験は3段階で実施しました。
+    <ul>
+      <li>フェーズA：認証なしで外部から送れる攻撃（ヘッダ・横断呼び出し・総当たり・情報露出 等）</li>
+      <li>フェーズB：試験用アカウントでログインした状態での攻撃（他人のデータへの到達・罠入力・時刻偽装 等）</li>
+      <li>フェーズC：防御強化の実装後に、効いているかの再確認</li>
+    </ul>
+  </li>
+  <li>あわせて、防御機能（H1〜H9 と呼ぶ一連の強化）をコードと動作の両面で確認しました。</li>
+</ul>
+
+<h2>2. 実施した試験と結果（一覧）</h2>
+<p class="small">「侵入可否」は攻撃者視点の結果です。「防いだ」は防御が効いたことを意味します。</p>
+
+<h3>フェーズA（未認証での攻撃）</h3>
+<table>
+  <tr><th style="width:26%">試験</th><th style="width:14%">結果</th><th>内容</th></tr>
+  <tr><td>セキュリティヘッダの確認</td><td class="warn">要対応</td><td>CSP 等のヘッダが HTTP レスポンスに無い（meta タグの CSP はあり）</td></tr>
+  <tr><td>CORS（他サイトからの呼び出し）</td><td class="ng">弱点</td><td>見知らぬオリジンをそのまま許可して返す設定だった</td></tr>
+  <tr><td>サインインの総当たり 25回</td><td class="ok">防御追加</td><td>当初は回数制限なし → 後述の強化で制限を追加</td></tr>
+  <tr><td>利用者の存在推測</td><td class="ok">防いだ</td><td>既知/未知のメールで応答・時間に差が出ないことを確認</td></tr>
+  <tr><td>新規登録の別経路</td><td class="ok">防いだ</td><td>サインアップは無効化済み（400 で拒否）</td></tr>
+  <tr><td>未認証での全手続き呼び出し</td><td class="ok">防いだ</td><td>動作確認用の <code>ping</code> 以外は全て 401</td></tr>
+  <tr><td>セッション偽造 5パターン</td><td class="ok">防いだ</td><td>乱数・署名なし・空・別名・Bearer偽造の全てが 401</td></tr>
+  <tr><td>ファイル露出</td><td class="ng">弱点</td><td>開発サーバーが <code>.env</code> や API のソース等を配信していた</td></tr>
+  <tr><td>メソッド改変・存在しない手続き</td><td class="ok">防いだ</td><td>GET は 405、存在しない手続きは 404</td></tr>
+  <tr><td>8MB の大きな本体</td><td class="ok">防いだ</td><td>未認証のため 401 で即拒否（53ms）</td></tr>
+  <tr><td>プロトタイプ汚染の試行</td><td class="ok">影響なし</td><td>注入しても以後の応答に影響なし</td></tr>
+</table>
+
+<h3>フェーズB（ログイン状態での攻撃）</h3>
+<table>
+  <tr><th style="width:26%">試験</th><th style="width:14%">結果</th><th>内容</th></tr>
+  <tr><td>他人のデータへの横取り</td><td class="ok">防いだ</td><td>同じ論理IDで push しても自分の領域にしか入らない</td></tr>
+  <tr><td>罠入力（負の数・巨大な数・型ちがい・パース不能 等）</td><td class="ok">防いだ</td><td>いずれも 400 で検証エラー。例外の漏出なし</td></tr>
+  <tr><td>巨大な暗号文（4MB）</td><td class="ok">防御追加</td><td>当初は通った → 上限 256KB を追加し 400 で拒否</td></tr>
+  <tr><td>SQL 文の混入</td><td class="ok">防いだ</td><td>パラメータ化のため影響なし</td></tr>
+  <tr><td>監査ログの時刻偽装</td><td class="warn">仕様として記録</td><td>時刻はクライアント申告を受け入れる設計（後述）</td></tr>
+  <tr><td>失効端末の再登録</td><td class="ok">防いだ</td><td>失効後の push は 403。再登録しても失効状態を維持</td></tr>
+  <tr><td>盗んだクッキーで別端末のふり</td><td class="warn">限界として記録</td><td>同一クッキーは別UA/別IPでも通る（後述）</td></tr>
+  <tr><td>ログイン履歴の60連打</td><td class="ok">防御追加</td><td>当初は無制限 → 記録数に上限を設け古いものを破棄</td></tr>
+</table>
+
+<h3>フェーズC（強化後の再確認）</h3>
+<table>
+  <tr><th style="width:30%">試験</th><th style="width:14%">結果</th><th>内容</th></tr>
+  <tr><td>名簿にないサイトからの呼び出し</td><td class="ok">防いだ</td><td>許可リスト外のオリジンは 403「許可されていない接続元です。」</td></tr>
+  <tr><td>vault/status に鍵の材料が出ないか</td><td class="ok">防いだ</td><td>ソルトや検証子は返さないことを確認</td></tr>
+  <tr><td>解錠材料の要求を30回連続</td><td class="ok">防いだ</td><td>20回で打ち止め、21回目以降は 429</td></tr>
+  <tr><td>暗号文の大きさ制限</td><td class="ok">防いだ</td><td>4MB は 400、64KB は 200</td></tr>
+  <tr><td>監査ログ切り詰め後の連鎖検証</td><td class="ok">防いだ</td><td>途中の番号から正しく検証（起点を返す）</td></tr>
+  <tr><td>端末失効で他端末が切れるか</td><td class="ok">防いだ</td><td>失効直後に他セッションは 401、手元は継続</td></tr>
+  <tr><td>合言葉の当てずっぽう 20回</td><td class="ok">防いだ</td><td>7回目以降は 429 で制限</td></tr>
+</table>
+
+<h2>3. 見つかった弱点と、直した内容（H1〜H9）</h2>
+<p>見つかった弱点に対し、9件の強化を実装しました。いずれもコードの確認と、実環境での動作確認を行っています。</p>
+
+<div class="avoid-break">
+<table>
+  <tr><th style="width:8%">番号</th><th style="width:34%">対応した弱点</th><th>直した内容と検証</th></tr>
+  <tr><td>H1</td><td>新規登録の開放</td><td>サインアップを無効化。利用者は登録されたオーナーのみに限定</td></tr>
+  <tr><td>H2</td><td>接続元の制限不足</td><td>信頼する接続元を名簿化（localhost・プレビューURL・アプリ固有のスキーム）。名簿外は 403</td></tr>
+  <tr><td>H3</td><td>サインインの総当たり耐性なし</td><td>サインインに回数制限（300秒に8回）を追加。超過は 429</td></tr>
+  <tr><td>H4</td><td>解錠まわりの情報露出と無制限</td><td>状態の応答から鍵の材料を除外。解錠材料の要求は15分に20回まで・超過で5分待機。検証で 200×20回 + 429×5回 を確認</td></tr>
+  <tr><td>H5</td><td>端末を失効しても他端末が残る</td><td>失効時に他のセッションを即時削除。検証で、失効後に他セッションが 401 になることを確認</td></tr>
+  <tr><td>H6</td><td>大きなデータでサーバーに負荷</td><td>1件あたりの暗号文を 256KB に制限（sync と vault の両方）。262,154バイトは 400、1,000バイトは 200 を確認</td></tr>
+  <tr><td>H7</td><td>取込データによる汚染</td><td>バックアップ取込に 20MB 上限・危険なキー（__proto__ 等）の除去・深さ制限を追加</td></tr>
+  <tr><td>H8</td><td>デスクトップ版のファイル読み書きが無制限</td><td>読み書きを、利用者がダイアログで選んだ場所に限定</td></tr>
+  <tr><td>H9</td><td>監査ログを切り詰めると検証が壊れる</td><td>切り詰め後の先頭番号を起点に検証するよう修正。検証で整合することを確認</td></tr>
+</table>
+</div>
+
+<h2>4. 残るリスク（直していない・直せないもの）</h2>
+<p>以下は今回の対応では直していない、または構造上そのまま残る事項です。公開・運用の判断材料としてください。</p>
+<table>
+  <tr><th style="width:30%">項目</th><th style="width:14%">区分</th><th>説明</th></tr>
+  <tr><td>CORS の全開放（基盤側）</td><td class="warn">残置</td><td>サーバーの土台部分（編集不可）が全オリジンを許可する。アプリ側の接続元チェック（H2）で実害は抑えているが、土台自体は変更していない</td></tr>
+  <tr><td>セキュリティヘッダ未付与</td><td class="warn">残置</td><td>CSP 等を HTTP ヘッダで出すにはサーバー側の設定が必要。現状は meta タグの CSP のみ</td></tr>
+  <tr><td>セッションと端末の非結合</td><td class="warn">残置</td><td>盗まれたクッキーは別端末・別IPでもそのまま使える。トークン漏えい時の限界</td></tr>
+  <tr><td>監査ログの時刻はクライアント申告</td><td class="warn">仕様</td><td>時刻は端末の申告を受け入れる設計。改ざん検知は連鎖で担保するが、時刻そのものの真正性は保証しない</td></tr>
+  <tr><td>開発サーバーのソース配信</td><td class="warn">開発環境のみ</td><td>vite の開発サーバーが <code>.env</code> やソースを配信しうる。本番ビルドでは発生しない想定だが、公開時は別途確認が必要</td></tr>
+</table>
+
+<h2>5. 未検証の範囲</h2>
+<p>以下は環境の制約により、今回は確認できていません。「問題ない」と判断したものではありません。</p>
+<ul>
+  <li><span class="warn">実機モバイルでの動作</span>：Expo アプリの実機・エミュレータでの確認は未実施。バンドルが生成されること（エラーなく200で返る）までの確認に留まる</li>
+  <li><span class="warn">デスクトップ（Electron）の画面</span>：画面の無い環境のため GUI の目視確認は未実施</li>
+  <li><span class="warn">開発ビルドでの Google サインイン</span>：モバイルの Google サインインは、Expo Go では構造的に使えず、開発ビルド（eas build）またはインストール版が必要。その実サインインは未検証</li>
+  <li><span class="warn">本番公開環境</span>：今回の対象は開発環境。公開時の挙動（HTTPS・ヘッダ・ドメイン）は別途確認が必要</li>
+</ul>
+
+<h2>6. まとめ</h2>
+<ul>
+  <li>外部からの侵入試験（未認証・ログイン状態）と、防御強化の再確認を実施しました。</li>
+  <li>見つかった弱点に対し、認証・接続元・回数制限・データサイズ・取込防御・端末管理・監査の9件を強化し、動作で確認しました。</li>
+  <li>一方で、CORS の土台設定・セキュリティヘッダ・セッションと端末の結合など、今回の範囲では直せない事項が残っています。公開前に、本番環境での再確認をおすすめします。</li>
+</ul>
+
+<div class="meta" style="margin-top:6mm">
+本報告書は開発環境への検証結果であり、絶対的な安全性を保証するものではありません。新たな機能追加や依存関係の更新により状況は変わります。重要な変更のたびに再検証することをおすすめします。
+</div>
+
+</body>
+</html>

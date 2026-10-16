@@ -1,0 +1,306 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+/* ------------------------------------------------------------------
+   Consulting Cockpit v4 — 操作卓のためのダークテーマ
+   design.md の値をそのまま CSS 変数にしている。色は増やさない。
+   ------------------------------------------------------------------ */
+
+@theme {
+  --color-ink-900: #0c0c0c;
+  --color-ink-850: #101010;
+  --color-ink-800: #141414;
+  --color-ink-700: #1b1b1b;
+  --color-ink-600: #222222;
+  --color-line: #2a2a2a;
+  --color-line-strong: #3a3a3a;
+
+  --color-paper: #f2efea;
+  --color-paper-dim: #9a948c;
+  --color-paper-faint: #6b665f;
+
+  --color-brand: #0e7490;
+  --color-brand-hi: #0891b2;
+  --color-brand-soft: rgba(14, 116, 144, 0.12);
+
+  --color-ok: #4a7c59;
+  --color-warn: #c9a961;
+  --color-alert: #b85c38;
+  --color-info: #3b6e8f;
+
+  --font-display: "Noto Sans JP", "Hiragino Kaku Gothic ProN", "Hiragino Sans", "Yu Gothic UI", "Yu Gothic", "Meiryo", system-ui, sans-serif;
+  --font-body: "Noto Sans JP", "Hiragino Kaku Gothic ProN", "Hiragino Sans", "Yu Gothic UI", "Yu Gothic", "Meiryo", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+}
+
+@theme inline {
+  --radius-sm: 3px;
+  --radius-md: 4px;
+  --radius-lg: 6px;
+  --radius-xl: 8px;
+  --color-background: var(--color-ink-900);
+  --color-foreground: var(--color-paper);
+  --color-card: var(--color-ink-800);
+  --color-card-foreground: var(--color-paper);
+  --color-popover: var(--color-ink-700);
+  --color-popover-foreground: var(--color-paper);
+  --color-primary: var(--color-brand);
+  --color-primary-foreground: #fff;
+  --color-secondary: var(--color-ink-700);
+  --color-secondary-foreground: var(--color-paper);
+  --color-muted: var(--color-ink-700);
+  --color-muted-foreground: var(--color-paper-dim);
+  --color-accent: var(--color-brand-soft);
+  --color-accent-foreground: var(--color-paper);
+  --color-destructive: var(--color-alert);
+  --color-border: var(--color-line);
+  --color-input: var(--color-line);
+  --color-ring: var(--color-brand);
+  --color-sidebar: var(--color-ink-850);
+  --color-sidebar-foreground: var(--color-paper);
+  --color-sidebar-primary: var(--color-brand);
+  --color-sidebar-primary-foreground: #fff;
+  --color-sidebar-accent: var(--color-ink-700);
+  --color-sidebar-accent-foreground: var(--color-paper);
+  --color-sidebar-border: var(--color-line);
+  --color-sidebar-ring: var(--color-brand);
+}
+
+@layer base {
+  * {
+    @apply border-border;
+    -webkit-tap-highlight-color: transparent;
+  }
+  html {
+    color-scheme: dark;
+    background: var(--color-ink-900);
+  }
+  body {
+    @apply bg-ink-900 text-paper;
+    font-family: var(--font-body);
+    font-size: 14px;
+    line-height: 1.7;
+    -webkit-font-smoothing: antialiased;
+    /* 業務画面なので本文を選択しやすくしておく（金額や番号をコピーする用途が多い） */
+  }
+  h1,
+  h2,
+  h3,
+  h4 {
+    font-family: var(--font-display);
+    font-weight: 600;
+    line-height: 1.35;
+    letter-spacing: -0.01em;
+  }
+  /* 数字・金額・ID は必ず等幅で桁を揃える */
+  .num,
+  code,
+  kbd,
+  pre {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+  input,
+  textarea,
+  select,
+  button {
+    font-family: inherit;
+    font-size: inherit;
+  }
+  textarea {
+    line-height: 1.8;
+  }
+  /* 細めのスクロールバー。業務画面で場所を取らせない */
+  ::-webkit-scrollbar {
+    width: 9px;
+    height: 9px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #2f2f2f;
+    border-radius: 6px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #3d3d3d;
+  }
+  ::selection {
+    background: rgba(14, 116, 144, 0.35);
+  }
+}
+
+@layer components {
+  /* 入力欄 —— 枠は細く、focus のときだけブランド色が出る */
+  .field {
+    @apply w-full rounded-sm border border-line bg-ink-850 px-2.5 py-1.5 text-paper
+           transition-colors duration-100 outline-none;
+  }
+  .field::placeholder {
+    color: var(--color-paper-faint);
+  }
+  .field:hover {
+    border-color: var(--color-line-strong);
+  }
+  .field:focus {
+    border-color: var(--color-brand);
+    background: var(--color-ink-800);
+  }
+  .field-label {
+    @apply mb-1 block text-[12px] font-medium tracking-wide text-paper-dim;
+  }
+
+  /* ボタン —— 主要アクションは1画面に1つだけ */
+  .btn {
+    @apply inline-flex cursor-pointer items-center justify-center gap-1.5 rounded-sm border
+           border-line bg-ink-700 px-3 py-1.5 text-[13px] font-medium text-paper
+           transition-colors duration-100 select-none;
+  }
+  .btn:hover {
+    background: var(--color-ink-600);
+    border-color: var(--color-line-strong);
+  }
+  .btn:disabled {
+    @apply cursor-not-allowed opacity-40;
+  }
+  .btn-primary {
+    background: var(--color-brand);
+    border-color: var(--color-brand);
+    color: #fff;
+  }
+  .btn-primary:hover {
+    background: var(--color-brand-hi);
+    border-color: var(--color-brand-hi);
+  }
+  .btn-ghost {
+    background: transparent;
+    border-color: transparent;
+    color: var(--color-paper-dim);
+  }
+  .btn-ghost:hover {
+    background: var(--color-ink-700);
+    color: var(--color-paper);
+  }
+  .btn-danger {
+    color: var(--color-alert);
+    border-color: rgba(184, 92, 56, 0.4);
+    background: rgba(184, 92, 56, 0.08);
+  }
+  .btn-danger:hover {
+    background: rgba(184, 92, 56, 0.16);
+    border-color: var(--color-alert);
+  }
+  .btn-sm {
+    @apply px-2 py-1 text-[12px];
+  }
+
+  /* パネル —— 角丸は最小限、罫線で仕切る */
+  .panel {
+    @apply rounded-md border border-line bg-ink-800;
+  }
+  .panel-head {
+    @apply flex items-center justify-between gap-3 border-b border-line px-4 py-2.5;
+  }
+  .panel-title {
+    @apply font-display text-[15px] font-semibold text-paper;
+  }
+  .panel-body {
+    @apply px-4 py-3.5;
+  }
+
+  /* セクション見出し */
+  .sec {
+    @apply mb-2 flex items-center gap-2 text-[13px] font-semibold tracking-wide text-paper-dim;
+  }
+  .sec::after {
+    content: "";
+    @apply h-px flex-1 bg-line;
+  }
+
+  /* 表 —— 行間を詰め、金額列は右寄せ */
+  .tbl {
+    @apply w-full border-collapse text-[13px];
+  }
+  .tbl th {
+    @apply border-b border-line px-2.5 py-2 text-left text-[12px] font-medium
+           whitespace-nowrap text-paper-dim;
+  }
+  .tbl td {
+    @apply border-b border-line/60 px-2.5 py-2 align-top;
+  }
+  .tbl tr:hover td {
+    background: rgba(255, 255, 255, 0.02);
+  }
+  .tbl .n {
+    @apply text-right;
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* 状態バッジ */
+  .badge {
+    @apply inline-flex items-center gap-1 rounded-sm border px-1.5 py-0.5 text-[11px]
+           font-medium whitespace-nowrap;
+  }
+
+  /* 生成結果（メール文面・書類本文）を読む面 */
+  .doc {
+    @apply rounded-sm border border-line bg-ink-850 px-4 py-3 text-[14px] whitespace-pre-wrap;
+    line-height: 1.9;
+  }
+
+  /* マスクモード：金額・企業名を伏せる。伏せていることが見て分かる形にする */
+  .masked {
+    filter: blur(5px);
+    user-select: none;
+    cursor: not-allowed;
+  }
+  .masked:hover {
+    filter: blur(3px);
+  }
+}
+
+@layer utilities {
+  /* 初回ロードの段階表示 */
+  @keyframes rise {
+    from {
+      opacity: 0;
+      transform: translateY(6px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+  .rise {
+    animation: rise 0.34s cubic-bezier(0.22, 0.8, 0.3, 1) both;
+  }
+  .rise-1 {
+    animation-delay: 0.06s;
+  }
+  .rise-2 {
+    animation-delay: 0.12s;
+  }
+  .rise-3 {
+    animation-delay: 0.18s;
+  }
+
+  @keyframes pulse-soft {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.45;
+    }
+  }
+  .pulse-soft {
+    animation: pulse-soft 1.6s ease-in-out infinite;
+  }
+
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "expo": {
+    "icon": "./assets/icon.png",
+    "android": {
+      "package": "com.consultingcockpit_k7q2.runable",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#0C0C0C"
+      },
+      "edgeToEdgeEnabled": true
+    },
+    "extra": {
+      "apiUrl": "https://consult-rjau47t-preview-4200.runable.site/",
+      "applicationId": "consult-rjau47t",
+      "runableAuthIssuer": "https://api.runable.com/api/auth"
+    },
+    "ios": {
+      "bundleIdentifier": "com.consultingcockpit_k7q2.runable",
+      "supportsTablet": true
+    },
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0C0C0C"
+    },
+    "name": "Consulting Cockpit",
+    "slug": "consulting-cockpit",
+    "version": "1.0.0",
+    "scheme": "runable-consult-rjau47t",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": true,
+    "web": {
+      "favicon": "./assets/favicon.png",
+      "bundler": "metro"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-secure-store",
+      "expo-web-browser"
+    ]
+  }
+}

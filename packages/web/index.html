@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="ja" class="dark">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<!--
+			外部への通信を絞る取り決め（Content-Security-Policy）。
+			許すのは「この操作卓自身」と、サインインの戻り先、アクセス数の計測だけ。
+			画像・字体・通信先を外部に広げないので、業務データが外に出る経路がない。
+		-->
+		<meta
+			http-equiv="Content-Security-Policy"
+			content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' ws: wss: https://api.runable.com https://r.lilstts.com https://collector.onedollarstats.com; frame-src 'self'; form-action 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'"
+		/>
+		<meta name="referrer" content="no-referrer" />
+		<link rel="icon" href="/favicon.ico" sizes="any" />
+		<link rel="icon" href="/icon-512.png" type="image/png" sizes="512x512" />
+		<link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+		<meta property="og:image" content="/og-image.png" />
+		<meta name="theme-color" content="#0C0C0C" />
+		<meta
+			name="description"
+			content="案件・営業・書類をひとつで動かす、山代業務改善事務所の操作卓。データは端末で暗号化してから預けます。"
+		/>
+		<!-- 業務データを扱うため、検索エンジンには載せない -->
+		<meta name="robots" content="noindex, nofollow, noarchive, nosnippet" />
+		<!-- 字体はこのアプリの中に置いてある。外部の配信元は使わない -->
+		<link rel="stylesheet" href="/fonts/fonts.css" />
+		<title>Consulting Cockpit｜山代業務改善事務所</title>
+	</head>
+	<body>
+		<div id="root"></div>
+		<!--
+			別のサイトの枠（iframe）に埋め込まれて操作されるのを防ぐ。
+			枠の中で開かれた場合は、中身を出さずに自分自身を最上位で開き直す。
+			（上の Content-Security-Policy の frame-ancestors は、
+			 meta で書いた場合ブラウザに無視されるため、外部スクリプトで受け止める。
+			 外部ファイルなのは、本番の CSP から 'unsafe-inline' を外すため）
+		-->
+		<script src="/frameguard.js"></script>
+		<script type="module" src="/src/web/main.tsx"></script>
+	</body>
+</html>

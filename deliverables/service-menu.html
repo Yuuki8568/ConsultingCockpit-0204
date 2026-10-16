@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<style>
+  @page {
+    size: A4;
+    margin: 18mm 16mm 20mm 16mm;
+    @bottom-center { content: "山代業務改善事務所 ／ 支援メニュー一覧（2026年8月時点） ／ " counter(page) " / " counter(pages); font-size: 8pt; color: #888; font-family: "Noto Sans CJK JP", sans-serif; }
+  }
+  * { box-sizing: border-box; }
+  body { font-family: "Noto Sans CJK JP", sans-serif; font-size: 9.5pt; color: #1a1a1a; line-height: 1.55; margin: 0; }
+  h1 { font-size: 20pt; margin: 0 0 2mm 0; color: #0C0C0C; }
+  .sub { font-size: 9pt; color: #555; margin-bottom: 6mm; }
+  .notice { background: #f6f4f0; border: 1px solid #ddd6c9; border-radius: 2mm; padding: 3mm 4mm; font-size: 8.5pt; color: #444; margin-bottom: 7mm; }
+  .menu { page-break-inside: avoid; border: 1px solid #d8d8d8; border-left: 3.5pt solid #C44D03; border-radius: 1.5mm; padding: 4mm 5mm; margin-bottom: 6mm; }
+  .menu h2 { font-size: 13pt; margin: 0 0 1mm 0; color: #0C0C0C; }
+  .catch { font-size: 9pt; color: #C44D03; margin-bottom: 3mm; }
+  .meta { display: table; width: 100%; font-size: 8.5pt; margin-bottom: 3mm; border-collapse: collapse; }
+  .meta div { display: table-cell; padding: 1.5mm 2mm; background: #fafafa; border: 1px solid #e5e5e5; }
+  .meta b { display: block; font-size: 7.5pt; color: #888; font-weight: normal; }
+  h3 { font-size: 9.5pt; margin: 2.5mm 0 1mm 0; color: #0C0C0C; }
+  ul { margin: 0 0 1mm 0; padding-left: 5mm; }
+  li { margin-bottom: 0.5mm; }
+  .ex li { color: #666; }
+  .price { margin-top: 2.5mm; padding: 2mm 3mm; background: #fdf6ef; border: 1px solid #ecd9c4; border-radius: 1mm; font-size: 9.5pt; font-weight: bold; color: #8a3400; }
+  .flow { margin: 0 0 7mm 0; padding: 3mm 4mm; border: 1px solid #d8d8d8; border-radius: 1.5mm; font-size: 8.5pt; color: #333; }
+  .flow b { color: #C44D03; }
+</style>
+</head>
+<body>
+
+<h1>支援メニュー一覧</h1>
+<div class="sub">山代業務改善事務所 ／ AI業務改善コンサルティング ／ 2026年8月時点</div>
+
+<div class="notice">
+  ご利用にあたって：
+  料金はすべて税抜表示です。消費税は別途ご請求します。最新の料金はご契約時の見積書をご確認ください。
+  お支払いは原則として前払い（ご入金の確認後に着手）です。
+  ここに記載の工数・期間は目安で、対象業務の量や関係部署の数によって変わります。正式な内容は個別の見積書で確定します。
+</div>
+
+<div class="flow">
+  <b>一般的な進め方の目安：</b>
+  まず「スポット相談」または「AI業務診断（ライト）」で現状と優先順位を整理し、その結果をもとに「設計（単発）」または「設計＋伴走（1ヶ月）」へ。
+  複数部門にまたがる場合は「集中伴走（3ヶ月）」、導入後の定着には「定着サポート（月額）」、社員向けの習得には「社内研修」が対応します。どこから入るかは初回相談で一緒に決めます。
+</div>
+
+<!-- 1 -->
+<div class="menu">
+  <h2>1. スポット相談（2時間）</h2>
+  <div class="catch">まず話だけしてみたい、方向性だけ確認したいときに。</div>
+  <div class="meta">
+    <div><b>かかる期間</b>単発（実施日のみ）</div>
+    <div><b>工数の目安</b>2〜3時間</div>
+    <div><b>契約形態</b>単発</div>
+  </div>
+  <h3>やること（料金に含まれるもの）</h3>
+  <ul>
+    <li>事前ヒアリング（フォームまたは30分の電話）</li>
+    <li>オンライン相談 2時間（画面共有で現状を見ながら）</li>
+    <li>その場で分かる範囲の助言と、次にやるとよいことの整理</li>
+    <li>相談内容の要約メモ（A4・1〜2枚）を後日送付</li>
+  </ul>
+  <h3>お渡しするもの</h3>
+  <ul><li>相談要約メモ（A4・1〜2枚）</li></ul>
+  <h3>この料金に含まれないもの</h3>
+  <ul class="ex">
+    <li>ツールの設定・操作代行</li>
+    <li>書類・プロンプト等の作成物</li>
+    <li>相談後の継続的な質問対応</li>
+  </ul>
+  <div class="price">¥30,000（税抜）・前払い（入金確認後に日程確定）</div>
+</div>
+
+<!-- 2 -->
+<div class="menu">
+  <h2>2. AI業務診断（ライト）</h2>
+  <div class="catch">どこにAIが使えるかを1週間で洗い出し、優先順位をつける。</div>
+  <div class="meta">
+    <div><b>かかる期間</b>1〜2週間</div>
+    <div><b>工数の目安</b>6〜10時間</div>
+    <div><b>契約形態</b>単発</div>
+  </div>
+  <h3>やること（料金に含まれるもの）</h3>
+  <ul>
+    <li>ヒアリング（90分×1回、対象部門の担当者）</li>
+    <li>業務フローの可視化（対象業務を1〜2件に絞る）</li>
+    <li>AI適性の簡易診断（情報管理・定型度・頻度の3軸）</li>
+    <li>改善施策の優先順位づけ（効果と工数の2軸）</li>
+    <li>診断レポート（A4・5〜8枚）の作成と説明会（30分）</li>
+  </ul>
+  <h3>お渡しするもの</h3>
+  <ul>
+    <li>業務フロー図（As-Is）</li>
+    <li>AI適性診断シート</li>
+    <li>診断レポート（優先順位つき）</li>
+  </ul>
+  <h3>この料金に含まれないもの</h3>
+  <ul class="ex">
+    <li>ツールの設定・操作代行</li>
+    <li>プロンプト集などの作成物</li>
+    <li>診断対象を2件超に広げる場合（別途見積）</li>
+  </ul>
+  <div class="price">¥50,000〜（税抜）・前払い。対象業務2件以上は ¥80,000〜</div>
+</div>
+
+<!-- 3 -->
+<div class="menu">
+  <h2>3. 業務改善 設計（単発）</h2>
+  <div class="catch">やることが決まっているとき、設計図と手順書だけを作る。</div>
+  <div class="meta">
+    <div><b>かかる期間</b>3〜4週間</div>
+    <div><b>工数の目安</b>15〜25時間</div>
+    <div><b>契約形態</b>単発</div>
+  </div>
+  <h3>やること（料金に含まれるもの）</h3>
+  <ul>
+    <li>対象業務の詳細ヒアリング（120分×1〜2回）</li>
+    <li>To-Be業務フローの設計（誰が・いつ・何をするか）</li>
+    <li>必要なプロンプト・テンプレートの設計（本数は内容により5〜15本）</li>
+    <li>運用ルール（情報の扱い・確認手順・エスカレーション先）の文書化</li>
+    <li>設計書の納品と説明会（60分）</li>
+  </ul>
+  <h3>お渡しするもの</h3>
+  <ul>
+    <li>To-Be業務フロー図</li>
+    <li>プロンプト・テンプレート（5〜15本）</li>
+    <li>運用ルール文書</li>
+    <li>設計説明会の資料</li>
+  </ul>
+  <h3>この料金に含まれないもの</h3>
+  <ul class="ex">
+    <li>実際の導入作業・設定代行</li>
+    <li>社員向け研修の実施</li>
+    <li>納品後の質問対応（別途スポット相談として依頼可）</li>
+  </ul>
+  <div class="price">¥200,000（税抜）・単発・前払い（入金確認後に着手）</div>
+</div>
+
+<!-- 4 -->
+<div class="menu">
+  <h2>4. 設計＋伴走（1ヶ月）</h2>
+  <div class="catch">設計から現場への導入まで、1ヶ月で走り切る。</div>
+  <div class="meta">
+    <div><b>かかる期間</b>1ヶ月</div>
+    <div><b>工数の目安</b>20〜30時間</div>
+    <div><b>契約形態</b>1ヶ月契約</div>
+  </div>
+  <h3>やること（料金に含まれるもの）</h3>
+  <ul>
+    <li>初週：ヒアリングと現状分析（対象業務1〜2件）</li>
+    <li>第2週：To-Beフローとプロンプトの設計・作成</li>
+    <li>第3週：担当者へのレクチャー（90分×2回）と並走での初回実施</li>
+    <li>第4週：運用の微調整・運用台帳の引き渡し</li>
+    <li>期間中のチャット質問対応（営業日24時間以内の返信）</li>
+    <li>週次の進捗報告（15分の電話または文面）</li>
+  </ul>
+  <h3>お渡しするもの</h3>
+  <ul>
+    <li>現状分析メモ</li>
+    <li>To-Be業務フロー図</li>
+    <li>プロンプト・テンプレート一式</li>
+    <li>運用台帳（誰が・いつ・何を確認するか）</li>
+    <li>導入完了レポート（A4・3〜5枚）</li>
+  </ul>
+  <h3>この料金に含まれないもの</h3>
+  <ul class="ex">
+    <li>対象業務を3件以上に広げる場合（別途見積）</li>
+    <li>他部門への横展開</li>
+    <li>複数人向けの正式な社内研修</li>
+  </ul>
+  <div class="price">月¥150,000〜（税抜）・前払い。対象2件まで。それ以上は ¥200,000〜</div>
+</div>
+
+<!-- 5 -->
+<div class="menu">
+  <h2>5. 集中伴走（3ヶ月）</h2>
+  <div class="catch">複数部門にまたがる導入や、AIリーダーの育成まで踏み込む。</div>
+  <div class="meta">
+    <div><b>かかる期間</b>3ヶ月</div>
+    <div><b>工数の目安</b>60〜100時間</div>
+    <div><b>契約形態</b>3ヶ月契約</div>
+  </div>
+  <h3>やること（料金に含まれるもの）</h3>
+  <ul>
+    <li>1ヶ月目：全社または2部門以上の現状分析と優先順位づけ</li>
+    <li>2ヶ月目：優先業務の設計・導入・担当者レクチャー</li>
+    <li>3ヶ月目：横展開・AIリーダー候補の育成・運用台帳の整備</li>
+    <li>定例ミーティング（週1回・30分）</li>
+    <li>期間中のチャット質問対応（営業日24時間以内の返信）</li>
+    <li>月次レポート（実績・課題・来月の打ち手）</li>
+    <li>経営層向けの中間報告（2ヶ月目終了時・30分）</li>
+  </ul>
+  <h3>お渡しするもの</h3>
+  <ul>
+    <li>全社／部門別の診断レポート</li>
+    <li>業務フロー図（As-Is／To-Be）</li>
+    <li>プロンプト・テンプレート一式</li>
+    <li>運用台帳と引き継ぎ資料</li>
+    <li>月次レポート（3回）</li>
+    <li>最終報告書（A4・10枚程度）</li>
+  </ul>
+  <h3>この料金に含まれないもの</h3>
+  <ul class="ex">
+    <li>システム開発（ツール設定の範囲を超えるもの）</li>
+    <li>常駐での作業</li>
+    <li>3ヶ月を超える継続支援（別途「定着サポート」へ）</li>
+  </ul>
+  <div class="price">¥550,000〜600,000（税抜）・3ヶ月総額・前払い。多部署横断は ¥800,000〜</div>
+</div>
+
+<!-- 6 -->
+<div class="menu">
+  <h2>6. 定着サポート（月額継続）</h2>
+  <div class="catch">導入後の「使われなくなる」を防ぐ、軽い伴走。</div>
+  <div class="meta">
+    <div><b>かかる期間</b>月額継続（1ヶ月単位の自動更新）</div>
+    <div><b>工数の目安</b>月4〜8時間</div>
+    <div><b>契約形態</b>月額継続</div>
+  </div>
+  <h3>やること（料金に含まれるもの）</h3>
+  <ul>
+    <li>月1回の定例ミーティング（60分・オンライン）</li>
+    <li>運用状況の確認と軽いチューニング</li>
+    <li>チャットでの質問対応（営業日24時間以内の返信）</li>
+    <li>プロンプトの追加・修正（月5本まで）</li>
+    <li>月次の簡易レポート（A4・1枚）</li>
+  </ul>
+  <h3>お渡しするもの</h3>
+  <ul>
+    <li>月次の簡易レポート</li>
+    <li>更新後のプロンプト集</li>
+  </ul>
+  <h3>この料金に含まれないもの</h3>
+  <ul class="ex">
+    <li>新しい業務への導入（別途「設計」または「集中伴走」）</li>
+    <li>トラブル時の即日対応（翌営業日まで）</li>
+    <li>社内研修の実施</li>
+  </ul>
+  <div class="price">月¥80,000〜100,000（税抜）・前払い（当該月の業務開始前まで）。稼働は月8時間まで</div>
+</div>
+
+<!-- 7 -->
+<div class="menu">
+  <h2>7. 社内研修（半日／1日）</h2>
+  <div class="catch">社員が自分でAIを使えるようにするための研修。</div>
+  <div class="meta">
+    <div><b>かかる期間</b>単発（実施日＋事前準備）</div>
+    <div><b>工数の目安</b>8〜16時間</div>
+    <div><b>契約形態</b>単発</div>
+  </div>
+  <h3>やること（料金に含まれるもの）</h3>
+  <ul>
+    <li>事前ヒアリング（60分・受講者のレベルと目的の確認）</li>
+    <li>研修テキストの作成（貴社の業務例を使った実践形式）</li>
+    <li>研修の実施（半日3時間、または1日6時間）</li>
+    <li>演習用のプロンプト集（受講者が持ち帰れるもの）</li>
+    <li>研修後1週間の質問対応（チャット）</li>
+  </ul>
+  <h3>お渡しするもの</h3>
+  <ul>
+    <li>研修テキスト</li>
+    <li>演習用プロンプト集</li>
+    <li>受講者アンケートの集計結果</li>
+  </ul>
+  <h3>この料金に含まれないもの</h3>
+  <ul class="ex">
+    <li>受講者個別のフォローアップ（別途「定着サポート」で可）</li>
+    <li>研修動画の撮影・編集</li>
+    <li>会場の手配（オンラインまたは貴社会議室を使用）</li>
+  </ul>
+  <div class="price">半日 ¥150,000／1日 ¥250,000（税抜）・前払い（入金確認後に実施日確定）</div>
+</div>
+
+</body>
+</html>
