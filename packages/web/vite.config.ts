@@ -2,8 +2,8 @@ import { defineConfig, loadEnv, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwind from "@tailwindcss/vite"
 import path from "path";
-import runableAnalyticsPlugin from "./vite/__plugins/runable-analytics-plugin";
-import honoDevPlugin from "./vite/__plugins/hono-dev-plugin";
+
+
 import assetOptimizerPlugin from "./vite/__plugins/asset-optimizer-plugin";
 
 const root = path.resolve(__dirname, "../..");
@@ -20,7 +20,7 @@ const root = path.resolve(__dirname, "../..");
 const PROD_CSP =
 	"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; " +
 	"img-src 'self' data: blob:; media-src 'self' blob:; " +
-	"connect-src 'self' https://api.runable.com https://r.lilstts.com; " +
+	"connect-src 'self'; " +
 	"frame-src 'self'; form-action 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'";
 
 /** ビルド成果物の CSP メタを本番用に差し替える */
@@ -48,7 +48,7 @@ export default defineConfig(({ mode }) => {
 		// All env files live at the repo root — keep Vite's own env loading there too,
 		// so packages/web/.env* files can never shadow the root .env.
 		envDir: root,
-		plugins: [honoDevPlugin(), react(), runableAnalyticsPlugin(), tailwind(), assetOptimizerPlugin(), strictCspPlugin()],
+		plugins: [react(), tailwind(), assetOptimizerPlugin(), strictCspPlugin()],
 		resolve: {
 			alias: {
 				"@": path.resolve(__dirname, "./src/web"),
@@ -57,7 +57,8 @@ export default defineConfig(({ mode }) => {
 		server: {
 			allowedHosts: true,
 			hmr: { overlay: false, },
-			cors: false
+			cors: false,
+            proxy: { "/api": "http://127.0.0.1:4200" }
 		}
 	};
 });

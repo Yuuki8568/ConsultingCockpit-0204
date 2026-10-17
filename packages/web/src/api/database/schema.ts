@@ -135,3 +135,11 @@ export const loginEvent = sqliteTable(
   },
   (t) => [index("login_user_at_idx").on(t.userId, t.atMs)],
 );
+
+// Persistent counters: Workers isolates cannot share an in-memory rate limiter.
+export const rateLimit = sqliteTable("rate_limit", {
+  id: text("id").primaryKey(),
+  key: text("key").notNull().unique(),
+  count: integer("count").notNull(),
+  lastRequest: integer("last_request").notNull(),
+});

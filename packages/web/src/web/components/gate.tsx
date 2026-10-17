@@ -106,8 +106,8 @@ function SignIn() {
   async function go() {
     setBusy(true);
     setErr(null);
-    const res = await authClient.managedAuth.signIn({ provider: "google" });
-    if (res.error && res.error.code !== "POPUP_CLOSED") {
+    const res = await authClient.signIn.social({ provider: "google", callbackURL: "/" });
+    if (res.error) {
       setErr(res.error.message ?? "サインインできませんでした");
     }
     setBusy(false);

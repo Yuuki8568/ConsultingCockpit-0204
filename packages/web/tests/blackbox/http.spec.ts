@@ -1,11 +1,20 @@
 import { test, expect } from '@playwright/test';
+import { createHmac } from 'node:crypto';
+const cookie = (token: string) => {
+ const signature = createHmac('sha256','isolated-test-secret-not-for-production-000000000000').update(token).digest('base64');
+ return `__Secure-better-auth.session_token=${encodeURIComponent(token + '.' + signature)}`;
+};
 const rpc = (request: any, path: string, input?: unknown, token='dummy-owner-token') => request.post(`/api/rpc/${path}`, {
-  headers: token ? {Authorization:`Bearer ${token}`} : {}, data:{json:input ?? null}
+  headers: token ? {Cookie:cookie(token)} : {}, data:{json:input ?? null}
 });
 test('unauthenticated and forged sessions cannot read vault material', async ({request}) => {
   for (const token of ['', 'forged-token']) for (const path of ['vault/status','vault/unlockParams','devices/list','audit/count']) {
     const res = await rpc(request,path,undefined,token); expect(res.status()).toBe(401);
   }
+});
+test('legacy bearer credentials are not accepted on the independent host', async ({request}) => {
+ const res = await request.post('/api/rpc/vault/status', {headers:{Authorization:'Bearer dummy-owner-token'},data:{json:null}});
+ expect(res.status()).toBe(401);
 });
 test('authenticated non-owner is forbidden', async ({request}) => {
   expect((await rpc(request,'vault/status',undefined,'dummy-outsider-token')).status()).toBe(403);
@@ -54,9 +63,9 @@ test('unlock material is rate limited on server', async ({request}) => {
   for (let i=0;i<20;i++) expect((await rpc(request,'vault/unlockParams')).status()).toBe(200);
   expect((await rpc(request,'vault/unlockParams')).status()).toBe(429);
 });
-test('sign-out revokes a previously valid bearer session', async ({request}) => {
+test('sign-out revokes a previously valid signed cookie session', async ({request}) => {
   expect((await rpc(request,'vault/status')).status()).toBe(200);
-  const response = await request.post('/api/auth/sign-out',{headers:{Authorization:'Bearer dummy-owner-token',Origin:'http://127.0.0.1:4420'},data:{}});
+  const response = await request.post('/api/auth/sign-out',{headers:{Cookie:cookie('dummy-owner-token'),Origin:'http://127.0.0.1:4420'},data:{}});
   expect(response.status()).toBe(200);
   expect((await rpc(request,'vault/status')).status()).toBe(401);
 });

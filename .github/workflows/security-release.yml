@@ -53,7 +53,7 @@ jobs:
           retention-days: 7
   deploy:
     needs: verify
-    if: github.event_name == 'workflow_dispatch' && inputs.action == 'deploy' && github.ref == 'refs/heads/main'
+    if: ${{ false }}
     environment: production
     runs-on: [self-hosted, cockpit-deploy]
     steps:
@@ -73,7 +73,7 @@ jobs:
           tar -xzf cockpit-release.tar.gz security-ops/deploy-release.sh
           bash security-ops/deploy-release.sh deploy "$PWD/cockpit-release.tar.gz" "$RELEASE_SHA"
   rollback:
-    if: github.event_name == 'workflow_dispatch' && inputs.action == 'rollback' && github.ref == 'refs/heads/main'
+    if: ${{ false }}
     environment: production
     runs-on: [self-hosted, cockpit-deploy]
     steps:
