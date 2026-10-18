@@ -17,6 +17,7 @@
   "env": {
     "staging": {
       "name": "consulting-cockpit-staging",
+      "observability": { "enabled": true, "head_sampling_rate": 1 },
       "vars": { "NODE_ENV": "production", "DEPLOYMENT_TARGET": "cloudflare" }
     },
     "production": {
