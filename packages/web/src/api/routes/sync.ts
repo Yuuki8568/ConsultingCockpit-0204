@@ -1,3 +1,4 @@
+import { MAX_SYNC_RECORDS } from "../../shared/sync-limits";
 import { ORPCError } from "@orpc/server";
 import { and, eq, gt, inArray, sql } from "drizzle-orm";
 import { z } from "zod";
@@ -66,7 +67,7 @@ export const sync = {
         deviceId: z.string().min(4).max(64),
         generation: z.number().int().min(1),
         since: z.number().int().min(0).default(0),
-        records: z.array(recordInput).max(500),
+        records: z.array(recordInput).max(MAX_SYNC_RECORDS, "同期の更新が必要です。ページを再読み込みしてください。"),
       }),
     )
     .handler(async ({ context, input }) => {
