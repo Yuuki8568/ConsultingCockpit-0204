@@ -15,22 +15,28 @@ const originalFetch = self.fetch.bind(self);
   catch (e) { return Promise.reject(e); }
 };
 
-self.onmessage = async ({ data }: MessageEvent<{ pcm: Float32Array }>) => {
+let recognizerPromise: ReturnType<typeof createRecognizer> | undefined;
+function createRecognizer() {
+  return pipeline('automatic-speech-recognition', MODEL, {
+    revision: MODEL_REVISION, device: 'wasm', dtype: 'q8',
+    progress_callback: (p) => {
+      const text = p.status === 'progress' ? `認識モデルをダウンロード中… ${Math.round(p.progress)}%` : '認識モデルを準備中…';
+      self.postMessage({ type: 'progress', text });
+    },
+  });
+}
+self.onmessage = async ({ data }: MessageEvent<{ pcm: Float32Array; keepStart?: number; keepEnd?: number }>) => {
   const pcm = data.pcm;
   try {
-    const recognizer = await pipeline('automatic-speech-recognition', MODEL, {
-      revision: MODEL_REVISION, device: 'wasm', dtype: 'q8',
-      progress_callback: (p) => {
-        const text = p.status === 'progress' ? `認識モデルをダウンロード中… ${Math.round(p.progress)}%（${p.file}）` : '認識モデルを準備中…';
-        self.postMessage({ type: 'progress', text });
-      },
-    });
-    self.postMessage({ type: 'progress', text: '端末内で日本語を文字起こし中…（数分かかる場合があります）' });
-    const result = await recognizer(pcm, { language: 'japanese', task: 'transcribe', chunk_length_s: 30, stride_length_s: 5 });
-    const text = (Array.isArray(result) ? result.map(r => r.text).join('\n') : result.text).trim();
-    self.postMessage({ type: 'done', text });
-    await recognizer.dispose();
-  } catch {
-    self.postMessage({ type: 'error' });
-  } finally { pcm.fill(0); }
+    const recognizer = await (recognizerPromise ??= createRecognizer());
+    const result = await recognizer(pcm, { language: 'japanese', task: 'transcribe', chunk_length_s: 30, stride_length_s: 5, return_timestamps: true, max_new_tokens: 448 });
+    const output = Array.isArray(result) ? result[0] : result;
+    // Context on both sides improves boundary recognition; only keep segments belonging to this window.
+    const text = data.keepStart === undefined ? output.text : (output.chunks ?? []).filter(chunk => {
+      const center = (chunk.timestamp[0] + (chunk.timestamp[1] ?? pcm.length / 16000)) / 2;
+      return center >= data.keepStart! && center < data.keepEnd!;
+    }).map(chunk => chunk.text).join('');
+    self.postMessage({ type: 'done', text: text.trim() });
+  } catch { self.postMessage({ type: 'error' }); }
+  finally { pcm.fill(0); }
 };

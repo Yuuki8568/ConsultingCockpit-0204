@@ -651,6 +651,9 @@ export interface CaseRecord {
 
 /** 面談の録画・録音の属性。ファイル本体は含まない（端末ローカルの暗号化チャンクとして別保管） */
 export interface RecordingMeta {
+  /** 大容量原本は保管せず、選択されたファイルから直接読む */
+  sourceOnly?: boolean;
+  transcription?: import("../lib/transcription/checkpoint").TranscriptionCheckpoint;
   id: string;
   /** 元のファイル名 */
   name: string;
