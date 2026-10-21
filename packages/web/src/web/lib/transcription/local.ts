@@ -54,7 +54,9 @@ export async function transcribeLocal(blob: Blob, seconds: number | undefined, s
             if (signal.aborted) return;
             if (data.type === 'progress') progress(`${data.text} (${label})`);
             if (data.type === 'done') finish(undefined, data.text);
-            if (data.type === 'error') finish(new Error('認識モデルの取得または処理に失敗しました。ネット接続と端末の空きを確認して再開してください。'));
+            if (data.type === 'error') finish(new Error(data.code === 'repetition'
+              ? '認識結果に不自然な繰り返しが残るため、この区間は保存せず停止しました。保存済みの文章を確認し、音声を整えて再度お試しください。'
+              : '認識モデルの取得または処理に失敗しました。ネット接続と端末の空きを確認して再開してください。'));
           };
           activeWorker.postMessage({ pcm, keepStart: part.start - part.from, keepEnd: part.end - part.from }, [pcm.buffer]);
         });

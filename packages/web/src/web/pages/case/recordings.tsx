@@ -277,7 +277,7 @@ export function CaseRecordings() {
         <input type="checkbox" checked={autoTranscribe} onChange={e => setAutoTranscribe(e.target.checked)} />
         取り込み後に端末内で自動文字起こし（日本語）
       </label>
-      <p className="mt-2 text-xs text-paper-faint">初回は認識モデルをダウンロードします。音声・動画は送信しません。結果の文章は案件データとして暗号化して同期します。1時間の面談を想定し、最大3時間・4GBまで受け付けます。1分ごとに結果を保存し、中断後に再開できます。長時間処理はPC推奨です。処理中は画面を開き、原本は別途保管してください。誤認識があるため内容を確認してください。</p>
+      <p className="mt-2 text-xs text-paper-faint">初回は約252MBの認識モデルをダウンロードします。音声・動画は送信しません。結果の文章は案件データとして暗号化して同期します。1時間の面談を想定し、最大3時間・4GBまで受け付けます。1分ごとに結果を保存し、中断後に再開できます。長時間処理はPC推奨です。精度を優先するため、処理に録音時間以上かかる場合があります。処理中は画面を開き、原本は別途保管してください。誤認識があるため内容を確認してください。</p>
       {recognition && <div className="mt-2" role="status">
         <p>{recognition.text}</p>
         <button className="btn btn-sm" onClick={() => { stopImport.current = true; controller.current?.abort(); }}>文字起こしを中止</button>

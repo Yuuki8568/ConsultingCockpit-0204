@@ -1,6 +1,7 @@
 import { env, pipeline } from '@huggingface/transformers';
 import { MODEL, MODEL_REVISION } from './limits';
 import { modelRequest } from './network-policy';
+import { GENERATION_OPTIONS, hasRunawayRepetition } from './generation';
 
 env.allowLocalModels = false;
 env.useBrowserCache = true;
@@ -29,8 +30,17 @@ self.onmessage = async ({ data }: MessageEvent<{ pcm: Float32Array; keepStart?: 
   const pcm = data.pcm;
   try {
     const recognizer = await (recognizerPromise ??= createRecognizer());
-    const result = await recognizer(pcm, { language: 'japanese', task: 'transcribe', chunk_length_s: 30, stride_length_s: 5, return_timestamps: true, max_new_tokens: 448 });
-    const output = Array.isArray(result) ? result[0] : result;
+    let result = await recognizer(pcm, GENERATION_OPTIONS);
+    let output = Array.isArray(result) ? result[0] : result;
+    if (hasRunawayRepetition(output.text)) {
+      self.postMessage({ type: 'progress', text: '繰り返しを検出したため、短い区間で再確認中…' });
+      result = await recognizer(pcm, { ...GENERATION_OPTIONS, chunk_length_s: 15, stride_length_s: 3 });
+      output = Array.isArray(result) ? result[0] : result;
+      if (hasRunawayRepetition(output.text)) {
+        self.postMessage({ type: 'error', code: 'repetition' });
+        return;
+      }
+    }
     // Context on both sides improves boundary recognition; only keep segments belonging to this window.
     const text = data.keepStart === undefined ? output.text : (output.chunks ?? []).filter(chunk => {
       const center = (chunk.timestamp[0] + (chunk.timestamp[1] ?? pcm.length / 16000)) / 2;

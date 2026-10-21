@@ -3,17 +3,30 @@
 const { chromium } = require('@playwright/test');
 const fs = require('node:fs');
 const path = require('node:path');
+const { createServer } = require('node:http');
 (async () => {
   if (!process.env.BENCH_FIXTURE || !process.env.BENCH_RESULT) throw Error('Set BENCH_FIXTURE and BENCH_RESULT');
-  const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
+  let modelServer;
+  const allowed = ['tokenizer.json', 'tokenizer_config.json', 'config.json', 'preprocessor_config.json', 'generation_config.json', 'onnx/encoder_model_quantized.onnx', 'onnx/decoder_model_merged_quantized.onnx'];
+  if (process.env.TRANSCRIPTION_MODEL_DIR) {
+    modelServer = createServer((req, res) => {
+      const relative = req.url.slice(1);
+      if (!allowed.includes(relative)) { res.writeHead(404); return res.end(); }
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      fs.createReadStream(path.join(process.env.TRANSCRIPTION_MODEL_DIR, relative)).on('error', () => { res.writeHead(404); res.end(); }).pipe(res);
+    });
+    await new Promise(resolve => modelServer.listen(0, '127.0.0.1', resolve));
+  }
+  const browser = await chromium.launch({ headless: true, dumpio: process.env.BENCH_DEBUG === '1', args: ['--no-sandbox'] });
   try {
     const page = await browser.newPage();
     await page.route('**/speech-bench', r => r.fulfill({ contentType: 'text/html', body: '<input type="file">' }));
     if (process.env.TRANSCRIPTION_MODEL_DIR) await page.route('https://huggingface.co/**', async route => {
-      const relative = route.request().url().split('/ff4177021cc41f7db950912b73ea4fdf7d01d8e7/')[1];
-      const allowed = ['tokenizer.json', 'tokenizer_config.json', 'config.json', 'preprocessor_config.json', 'generation_config.json', 'onnx/encoder_model_quantized.onnx', 'onnx/decoder_model_merged_quantized.onnx'];
+      const match = new URL(route.request().url()).pathname.match(/^\/onnx-community\/whisper-(?:tiny|base|small)\/resolve\/[a-f0-9]{40}\/(.+)$/);
+      const relative = match?.[1];
       if (!allowed.includes(relative)) return route.fulfill({ status: 404, body: 'missing' });
-      await route.fulfill({ path: path.join(process.env.TRANSCRIPTION_MODEL_DIR, relative), headers: { 'access-control-allow-origin': '*' } });
+      // Stream large model bytes over loopback instead of copying them through CDP/base64.
+      await route.fulfill({ status: 302, headers: { location: `http://127.0.0.1:${modelServer.address().port}/${relative}`, 'access-control-allow-origin': '*' }, body: '' });
     });
     await page.goto('http://127.0.0.1:4180/speech-bench');
     await page.locator('input').setInputFiles(process.env.BENCH_FIXTURE);
@@ -41,5 +54,5 @@ const path = require('node:path');
     fs.writeFileSync(process.env.BENCH_RESULT, JSON.stringify(result, null, 2));
     console.log(JSON.stringify({ status: result.status, wallSeconds: result.wallSeconds, completedSeconds: result.checkpoints.at(-1)?.audioSeconds ?? 0 }));
     if (result.status !== 'done') process.exitCode = 1;
-  } finally { await browser.close(); }
+  } finally { await browser.close(); modelServer?.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

@@ -30,14 +30,14 @@ mock.module('../src/web/lib/transcription/decode', () => ({ openAudio: async () 
 const { transcribeLocal } = await import('../src/web/lib/transcription/local');
 const originals = { Worker: globalThis.Worker, OfflineAudioContext: globalThis.OfflineAudioContext };
 afterEach(() => { Object.assign(globalThis, originals); reads.length = 0; disposed = 0; duration = 125; });
-function fakeBrowser(mode: 'done' | 'pending' | 'second-error' = 'done') {
+function fakeBrowser(mode: 'done' | 'pending' | 'second-error' | 'repetition' = 'done') {
   const stats = { terminated: 0, created: 0, calls: 0 };
   class MockWorker {
     onmessage?: (event: { data: unknown }) => void;
     constructor() { stats.created++; }
     postMessage() {
       stats.calls++;
-      if (mode !== 'pending') queueMicrotask(() => this.onmessage?.({ data: mode === 'second-error' && stats.calls === 2 ? { type: 'error' } : { type: 'done', text: '区間' + stats.calls } }));
+      if (mode !== 'pending') queueMicrotask(() => this.onmessage?.({ data: mode === 'repetition' ? { type: 'error', code: 'repetition' } : mode === 'second-error' && stats.calls === 2 ? { type: 'error' } : { type: 'done', text: '区間' + stats.calls } }));
     }
     terminate() { stats.terminated++; }
   }
@@ -85,4 +85,27 @@ test('cancel destroys running worker without advancing checkpoint', async () => 
   await new Promise(r => setTimeout(r, 15)); controller.abort();
   await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
   expect(stats.terminated).toBe(1); expect(saves).toBe(0); expect(disposed).toBe(1);
+});
+
+
+// Guard the decoder capacity, including Whisper's 3-token language/task prompt.
+import { GENERATION_OPTIONS, hasRunawayRepetition } from '../src/web/lib/transcription/generation';
+test('decoder generation limit includes the prompt instead of adding 448 tokens', () => {
+  expect(GENERATION_OPTIONS.max_length).toBe(448);
+  expect('max_new_tokens' in GENERATION_OPTIONS).toBe(false);
+  expect(GENERATION_OPTIONS.max_length - 3).toBe(445);
+});
+test('runaway phrase loops are flagged but ordinary repeated speech is preserved', () => {
+  expect(hasRunawayRepetition('それが、ビデオのビデオがあるから、'.repeat(12))).toBe(true);
+  expect(hasRunawayRepetition('そうですね。ありがとうございます。そうですね。ありがとうございます。')).toBe(false);
+  expect(hasRunawayRepetition('屋外の気温が昼も夜も上がっています。空気を入れ替えます。')).toBe(false);
+});
+
+test('unresolved repetition never advances the saved checkpoint', async () => {
+  const stats = fakeBrowser('repetition');
+  let saves = 0;
+  await expect(transcribeLocal(new Blob(['audio']), duration, new AbortController().signal, () => {}, {
+    save: async () => { saves++; },
+  })).rejects.toThrow('不自然な繰り返し');
+  expect(saves).toBe(0); expect(stats.terminated).toBe(1); expect(disposed).toBe(1);
 });
