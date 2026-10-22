@@ -329,7 +329,7 @@ export function CaseRecordings() {
           <p className="text-[13px] text-paper-dim">
             ここに映像・音声ファイルをドロップ（またはクリックして選択）
             <span className="mt-1 block text-[11px] text-paper-faint">
-              mp4 / webm / mov / mp3 / m4a / wav など。サイズの上限はありません。
+              mp4 / webm / mov / mp3 / m4a / wav など。最大3時間・4GBまで。
             </span>
           </p>
         )}

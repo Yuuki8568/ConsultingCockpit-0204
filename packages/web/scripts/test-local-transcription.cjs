@@ -9,7 +9,7 @@ const worker=fs.readdirSync(root+'/dist/assets').find(x=>x.startsWith('transcrib
 const server=createServer((req,res)=>{
  res.setHeader('Content-Security-Policy',csp);
  if(req.url==='/harness'){res.setHeader('Content-Type','text/html');return res.end('<!doctype html><title>Transcription test</title>');}
- if(req.url.startsWith('/model/') && process.env.TRANSCRIPTION_MODEL_DIR){const relative=req.url.slice(7);if(!modelFiles.includes(relative)){res.statusCode=404;return res.end();}return fs.createReadStream(path.join(process.env.TRANSCRIPTION_MODEL_DIR,relative)).pipe(res);}
+ if(req.url.startsWith('/model/') && process.env.TRANSCRIPTION_MODEL_DIR){res.setHeader('Access-Control-Allow-Origin','*');const relative=req.url.slice(7);if(!modelFiles.includes(relative)){res.statusCode=404;return res.end();}return fs.createReadStream(path.join(process.env.TRANSCRIPTION_MODEL_DIR,relative)).pipe(res);}
  const file=req.url==='/fixture.wav'?process.env.TRANSCRIPTION_FIXTURE:path.join(root,'dist',req.url);
  if(!fs.existsSync(file)){res.statusCode=404;return res.end();}
  res.setHeader('Content-Type',file.endsWith('.wasm')?'application/wasm': /\.(js|mjs)$/.test(file)?'text/javascript':'audio/wav');fs.createReadStream(file).pipe(res);
