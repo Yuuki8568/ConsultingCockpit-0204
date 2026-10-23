@@ -33,6 +33,7 @@ import { SEC_CONFIG } from "../lib/security";
 import { buildEncryptedBackup, decryptBackup, isEncryptedBackup } from "../lib/export/backup";
 import { deviceIdFor, vaultStore } from "../lib/store/vault-store";
 import { useDesktop } from "../hooks/use-desktop";
+import { AutomaticBackupSettings } from "./automatic-backup";
 import { DesktopBackup } from "./desktop-backup";
 
 type Tab = "profile" | "templates" | "messages" | "referrals" | "security" | "data";
@@ -969,6 +970,7 @@ function DataTab() {
         )}
       </Panel>
 
+      <AutomaticBackupSettings />
       <DesktopBackup />
 
       <Panel
