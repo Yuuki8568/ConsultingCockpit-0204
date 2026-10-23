@@ -146,7 +146,10 @@ export function CaseRecordings() {
         }
         // Large originals have no durable browser copy: don't register them as
         // imported until the configured archive has been written and verified.
-        if (sourceOnly) await archiveOriginal(meta, f);
+        if (sourceOnly) {
+          await archiveOriginal(meta, f);
+          if (!alive.current || stopImport.current || current.current.id !== caseId || current.current.phase !== "unlocked") break;
+        }
         await patch((x) => {
           x.recordings = x.recordings ?? [];
           x.recordings.push(meta);
