@@ -33,6 +33,8 @@ await backup.runBackup();let count=0;for await(const _ of records.entries())coun
 await backup.archiveOriginal(store.getState().cases[0].recordings[1],new File(['hello audio!'],'sample.wav'));await backup.runBackup(true);config=await backup.getBackupConfig();if(config.missing!==0)throw Error('original recovery');
 const originals=await dir.getDirectoryHandle('02_録音・動画原本');const f=await originals.getFileHandle('rec-missing--sample.wav');const w=await f.createWritable();await w.write('bad');await w.close();await backup.runBackup(true);config=await backup.getBackupConfig();if(config.missing!==1)throw Error('corruption');
 if(config.issues?.[0]?.recordId!=='rec-missing')throw Error('missing file not identified');
+let mismatch=false;try {backup.validateOriginalSelection(store.getState().cases[0].recordings[1],new File(['wrong'],'sample.wav'));}catch(e){mismatch=e.message.includes('12 bytes')&&e.message.includes('5 bytes');}if(!mismatch)throw Error('size diagnostics');
+backup.validateOriginalSelection({...store.getState().cases[0].recordings[1],name:'が.wav'},new File(['hello audio!'],'か\u3099.wav'));
 const ambiguous=await backup.archiveMatchingOriginals([new File(['hello audio!'],'sample.wav')]);if(ambiguous.saved!==0 || ambiguous.skipped!==1)throw Error('ambiguous match accepted');
 const longMeta={...store.getState().cases[0].recordings[1],id:'long-name',name:'会議録音'.repeat(60)+'.wav'};
 if(new TextEncoder().encode(backup.mediaName(longMeta)).length>255)throw Error('UTF8 filename limit');await store.mutate(s=>s.cases[0].recordings.push(longMeta));const matched=await backup.archiveMatchingOriginals([new File(['hello audio!'],longMeta.name)]);if(matched.saved!==1 || matched.skipped!==0 || !backup.mediaName(longMeta).endsWith('.wav'))throw Error('unique batch recovery');
@@ -58,7 +60,7 @@ if(await page.getByRole('button',{name:'バックアップ通知を閉じる'}).
 await page.getByRole('list',{name:'未保存の原本'}).getByText('sample.wav',{exact:true}).waitFor();
 await page.evaluate(async()=>{const c=await backup.getBackupConfig();await idb.setMeta('automatic-backup-v1',{...c,message:'バックアップ未完了：別の障害'});window.dispatchEvent(new Event('cockpit-backup'));});
 await page.getByRole('button',{name:'バックアップ通知を閉じる'}).waitFor();
-await page.evaluate(async()=>{await backup.archiveOriginal(store.getState().cases[0].recordings[1],new File(['hello audio!'],'sample.wav'));await backup.runBackup(true);});
+await page.getByLabel('sample.wavの原本を選んで保存',{exact:true}).setInputFiles({name:'sample.wav',mimeType:'audio/wav',buffer:Buffer.from('hello audio!')});
 await page.getByRole('button',{name:'バックアップ済み：今すぐバックアップ',exact:true}).waitFor();
 await page.evaluate(()=>store.mutate(s=>{s.cases[0].name='changed backup test';}));
 await page.getByRole('button',{name:'未バックアップ：今すぐバックアップ',exact:true}).click();
@@ -86,6 +88,9 @@ await page.getByText('取り込めませんでした: large.wav',{exact:false}).
 if(await page.evaluate(()=>store.getState().cases[0].recordings.length)!==beforeImport)throw Error('large original incorrectly registered');
 await page.evaluate(()=>{FileSystemDirectoryHandle.prototype.queryPermission=window.originalQuery;});
 console.log({largeImportRequiresVerifiedArchive:true});
+await page.evaluate(async()=>{const meta={...store.getState().cases[0].recordings[0],id:'missing-browser-body',name:'cinestudy_restaurant_shot04_edit.mp4',sourceOnly:false};await store.mutate(s=>s.cases[0].recordings.push(meta));await backup.runBackup(true);const c=await backup.getBackupConfig();if(!c.issues.some(i=>i.recordId===meta.id&&i.reason.includes('この端末にありません')))throw Error('missing body diagnosis');});
+console.log({directOriginalFilePicker:true,sizeMismatchDetails:true,unicodeFilenameNormalization:true,missingBrowserBodyExplained:true});
+
 await page.evaluate(async()=>{const before=(await backup.getBackupConfig()).last;store.lock();await backup.runBackup(true);if((await backup.getBackupConfig()).last!==before)throw Error('locked run');});
 console.log({dismissButton:true,sameWarningStaysDismissed:true,remountDismissal:true,detailsRemain:true,newErrorShown:true,lockedSkip:true});
 }finally{if(browser)await browser.close();server.kill();for(const f of[entry,html])fs.unlinkSync(f);}})().catch(e=>{console.error(e);process.exitCode=1});

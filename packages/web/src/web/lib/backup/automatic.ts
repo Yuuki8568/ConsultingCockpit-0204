@@ -16,7 +16,11 @@ export const RETRY = 5 * 60 * 1000;
 export function backupWarningKey(config: BackupConfig) {
   return JSON.stringify([config.message, config.issues?.map(i => [i.recordId, i.reason]).sort()]);
 }
-const failureReason = (error: unknown) => error instanceof DOMException && error.name === 'QuotaExceededError'
+const failureReason = (error: unknown) => error instanceof Error && error.message.startsWith('原本データが')
+  ? error.message
+  : error instanceof DOMException && ['NotReadableError', 'NotFoundError'].includes(error.name)
+    ? '元ファイルを読み取れません。Google Driveでダウンロードを完了してから、元ファイルを再選択してください。'
+  : error instanceof DOMException && error.name === 'QuotaExceededError'
   ? '保存先の空き容量が不足しています。容量を確保して再試行してください。'
   : error instanceof DOMException && ['NotAllowedError', 'SecurityError'].includes(error.name)
     ? '保存権限がありません。保存を許可して再試行してください。'
@@ -82,7 +86,12 @@ async function saveOriginal(dir: FileSystemDirectoryHandle, meta: RecordingMeta,
   const hashes = await writeVerified(dir, mediaName(meta), blob);
   await writeVerified(dir, `${encodeURIComponent(meta.id)}.json`, new Blob([JSON.stringify({ id: meta.id, file: mediaName(meta), size: blob.size, chunkSize: CHUNK, hashes })]));
 }
+export function validateOriginalSelection(meta: RecordingMeta, file: File) {
+  if (file.size !== meta.size) throw new Error(`選択したファイルのサイズが異なります。登録時：${meta.size.toLocaleString()} bytes、選択：${file.size.toLocaleString()} bytes。編集・変換前の同じ原本を選んでください。`);
+  if (file.name.normalize('NFC') !== meta.name.normalize('NFC')) throw new Error(`ファイル名が異なります。登録時：${meta.name}、選択：${file.name}。登録時の名前の原本を選んでください。`);
+}
 export async function archiveOriginal(meta: RecordingMeta, file: File) {
+  validateOriginalSelection(meta, file);
   // Re-read config inside the lock: another tab may change/pause the destination.
   return navigator.locks.request('cockpit-auto-backup', async () => {
     const config = await getBackupConfig();
@@ -94,7 +103,7 @@ export async function archiveOriginal(meta: RecordingMeta, file: File) {
       await saveConfig({ ...config, coverage: undefined, lastAttempt: undefined, message: '原本を保存しました。案件データの次回保存を待っています。' });
       return true;
     } catch (error) {
-      await saveConfig({ ...config, coverage: undefined, lastAttempt: undefined, message: '原本バックアップ未完了。設定から元ファイルを再選択してください。' });
+      await saveConfig({ ...config, coverage: undefined, lastAttempt: undefined, message: `原本バックアップ未完了：${failureReason(error)}` });
       throw error;
     }
   });
@@ -108,7 +117,7 @@ export async function archiveMatchingOriginals(files: File[]) {
   const records = state.cases.flatMap(c => c.recordings ?? []);
   let saved = 0, skipped = 0;
   for (const file of files) {
-    const matches = records.filter(r => r.name === file.name && r.size === file.size);
+    const matches = records.filter(r => r.name.normalize('NFC') === file.name.normalize('NFC') && r.size === file.size);
     if (matches.length !== 1) { skipped++; continue; }
     if (!await archiveOriginal(matches[0], file)) throw new Error('自動保存が停止されています');
     saved++;
@@ -153,11 +162,13 @@ export async function runBackup(force = false) {
       }
       const originals = await config.directory.getDirectoryHandle('02_録音・動画原本', { create: true });
       const issues: MissingOriginal[] = [];
+      const localMediaIds = new Set(await idb.listMediaIds());
       for (const c of state.cases) for (const r of c.recordings ?? []) {
         if (!vaultStore.getState()) throw new Error('施錠されたため原本の保存を中断しました');
         if (await originalExists(originals, r)) continue;
         try {
           if (r.sourceOnly) { issues.push({ caseId: c.id, recordId: r.id, reason: '大容量の原本はこのブラウザーに残っていません。元ファイルを再選択してください。' }); continue; }
+          if (!localMediaIds.has(r.id)) throw new Error('原本データがこの端末にありません。案件の同期・JSON復元には動画本体は含まれません。「原本を選んで保存」から元ファイルを指定してください。');
           await saveOriginal(originals, r, await vaultStore.readMediaBlob(r.id, r.mimeType));
         } catch (error) { issues.push({ caseId: c.id, recordId: r.id, reason: failureReason(error) }); }
       }

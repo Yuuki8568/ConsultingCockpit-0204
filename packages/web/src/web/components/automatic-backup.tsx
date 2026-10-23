@@ -1,7 +1,7 @@
 import { useEffect, useState, useSyncExternalStore } from 'react';
 import { vaultStore } from '../lib/store/vault-store';
 import { useVault } from '../hooks/use-vault';
-import { archiveOriginal, archiveMatchingOriginals, backupWarningKey, backupSupported, chooseBackupFolder, getBackupConfig, getBackupRunning, pauseBackup, permitBackup, runBackup, type BackupConfig } from '../lib/backup/automatic';
+import { archiveOriginal, validateOriginalSelection, archiveMatchingOriginals, backupWarningKey, backupSupported, chooseBackupFolder, getBackupConfig, getBackupRunning, pauseBackup, permitBackup, runBackup, type BackupConfig } from '../lib/backup/automatic';
 
 function useBackupStatus() {
   const [config, setConfig] = useState<BackupConfig>();
@@ -100,7 +100,13 @@ export function AutomaticBackupSettings() {
     <p className="text-sm">通知を閉じても未保存の状態と再試行は継続します。未完了分は解錠中に約5分ごとに再確認します。</p>
     {issues.length > 0 && <ul aria-label="未保存の原本" className="space-y-2">{issues.map(issue => {
       const meta = recordings.find(r => r.id === issue.recordId);
-      return <li key={`${issue.caseId}:${issue.recordId}`} className="rounded border p-2"><strong>{meta?.name ?? '録音・動画'}</strong><p>{issue.reason}</p><button type="button" className={backupButton} onClick={() => setRecordId(issue.recordId)}>この原本を指定する</button></li>;
+      return <li key={`${issue.caseId}:${issue.recordId}`} className="rounded border p-2"><strong>{meta?.name ?? '録音・動画'}</strong><p>{issue.reason}</p>{meta && <p className="text-xs">登録サイズ：{meta.size.toLocaleString()} bytes</p>}
+        <label className="block mt-2">原本を選んで保存
+          <input className={filePicker} type="file" aria-label={`${meta?.name ?? '録音・動画'}の原本を選んで保存`} disabled={disabled || !meta || !config?.enabled} onChange={e => {
+            const file = e.target.files?.[0]; e.target.value = '';
+            if (file && meta) void action(async () => { validateOriginalSelection(meta, file); await permitBackup(); await archiveOriginal(meta, file); await runBackup(true); setMessage('原本の保存・読み戻し検証を実行しました。上の状態を確認してください。'); });
+          }} />
+        </label></li>;
     })}</ul>}
     {!!config?.missing && !issues.length && <p>既存の未保存情報を更新するため「保存を許可して今すぐ実行」を押してください。</p>}
     {!backupSupported() ? <p>このブラウザーでは自動保存先を指定できません。MacのChromeで設定してください。</p> : <div className="flex flex-wrap gap-3">
@@ -111,7 +117,7 @@ export function AutomaticBackupSettings() {
     {config && recordings.length > 0 && <div className="space-y-2">
       <p className="text-sm">未保存の原本がある場合は、該当する録音を選び元ファイルを指定してください。</p>
       <select className="block min-h-10 w-full rounded-lg border border-sky-400/60 bg-ink-800 px-3 py-2" aria-label="原本を追加する録音" value={recordId} onChange={e => setRecordId(e.target.value)}><option value="">録音・動画を選択</option>{recordings.map(r => <option key={r.id} value={r.id}>{r.name}（{r.addedAt}）</option>)}</select>
-      <input className={filePicker} type="file" aria-label="バックアップする原本" disabled={disabled || !recordId || !config.enabled} onChange={e => { const file = e.target.files?.[0]; e.target.value = ''; const meta = recordings.find(r => r.id === recordId); if (file && meta) void action(async () => { if (file.name !== meta.name || file.size !== meta.size) throw new Error('登録時と同じ名前・サイズの原本を選択してください'); await permitBackup(); await archiveOriginal(meta, file); await runBackup(true); }); }} />
+      <input className={filePicker} type="file" aria-label="バックアップする原本" disabled={disabled || !recordId || !config.enabled} onChange={e => { const file = e.target.files?.[0]; e.target.value = ''; const meta = recordings.find(r => r.id === recordId); if (file && meta) void action(async () => { validateOriginalSelection(meta, file); await permitBackup(); await archiveOriginal(meta, file); await runBackup(true); }); }} />
       <label className="block">複数の原本をまとめて補完
         <input className={filePicker} type="file" multiple aria-label="原本をまとめて補完" disabled={disabled || !config.enabled} onChange={e => {
           const files = Array.from(e.target.files ?? []); e.target.value = '';
