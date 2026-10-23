@@ -11,7 +11,7 @@ const KEY = 'automatic-backup-v1';
 const CHUNK = 8 * 1024 * 1024;
 export const DAY = 24 * 60 * 60 * 1000;
 export interface MissingOriginal { caseId: string; recordId: string; reason: string }
-export interface BackupConfig { directory: Directory; enabled: boolean; last?: number; lastComplete?: number; lastAttempt?: number; coverage?: string; message?: string; missing?: number; issues?: MissingOriginal[] }
+export interface BackupConfig { directory: Directory; enabled: boolean; last?: number; lastComplete?: number; lastAttempt?: number; snapshotHash?: string; coverage?: string; message?: string; missing?: number; issues?: MissingOriginal[] }
 export const RETRY = 5 * 60 * 1000;
 export function backupWarningKey(config: BackupConfig) {
   return JSON.stringify([config.message, config.issues?.map(i => [i.recordId, i.reason]).sort()]);
@@ -21,6 +21,9 @@ const failureReason = (error: unknown) => error instanceof DOMException && error
   : error instanceof DOMException && ['NotAllowedError', 'SecurityError'].includes(error.name)
     ? '保存権限がありません。保存を許可して再試行してください。'
     : '原本の読込・保存・検証に失敗しました。保存先を確認するか元ファイルを再選択してください。';
+let running = false;
+export const getBackupRunning = () => running;
+function setRunning(value: boolean) { running = value; window.dispatchEvent(new Event('cockpit-backup')); }
 export const getBackupConfig = () => idb.getMeta<BackupConfig>(KEY);
 async function saveConfig(config: BackupConfig) { await idb.setMeta(KEY, config); window.dispatchEvent(new Event('cockpit-backup')); }
 export function backupSupported() { return 'showDirectoryPicker' in window; }
@@ -128,6 +131,7 @@ export async function runBackup(force = false) {
     if (!force && !dailyDue && !changed && !config.missing && !config.message?.includes('未完了')) return;
     if (!force && config.lastAttempt && Date.now() - config.lastAttempt < RETRY) return;
     const attempt = Date.now();
+    setRunning(true);
     try {
       if (await config.directory.queryPermission({ mode: 'readwrite' }) !== 'granted') throw new Error('保存権限が必要です。「保存を許可して今すぐ実行」を押してください');
       await vaultStore.flushPending();
@@ -135,6 +139,7 @@ export async function runBackup(force = false) {
       if (!state) return;
       const writeSnapshot = force || dailyDue || changed;
       let savedAt = config.last;
+      let snapshotHash = config.snapshotHash;
       const stamp = new Date().toISOString().replace(/[:.]/g, '-') + '-' + crypto.randomUUID().slice(0, 8);
       if (writeSnapshot) {
         const text = await buildEncryptedBackup(state);
@@ -143,6 +148,7 @@ export async function runBackup(force = false) {
         if (JSON.stringify(restored.state) !== JSON.stringify(state)) throw new Error('復元検証に失敗しました');
         const records = await config.directory.getDirectoryHandle('01_案件データ_暗号化', { create: true });
         await writeVerified(records, `cockpit-${stamp}.json`, new Blob([text]));
+        snapshotHash = await vaultStore.backupFingerprint(state);
         savedAt = Date.now();
       }
       const originals = await config.directory.getDirectoryHandle('02_録音・動画原本', { create: true });
@@ -159,10 +165,10 @@ export async function runBackup(force = false) {
       const docs = await config.directory.getDirectoryHandle('03_復元手順・検証記録', { create: true });
       await writeVerified(docs, '復元手順.txt', new Blob([RESTORE]));
       await writeVerified(docs, `${stamp}.json`, new Blob([JSON.stringify({ at: stamp, recordsVerified: true, recordsSavedAt: savedAt, missingOriginals: missing, issues, cloudUploadVerified: false })]));
-      await saveConfig({ ...config, last: savedAt, lastComplete: missing ? config.lastComplete : Date.now(), lastAttempt: attempt, coverage: coverageHash, missing, issues, message: missing ? `案件データ保存済み。原本${missing}件が未保存です（全体バックアップ未完了）。` : '案件データ・登録済み原本の保存と読戻し検証が完了しました。Driveの同期完了は別途確認してください。' });
+      await saveConfig({ ...config, last: savedAt, snapshotHash, lastComplete: missing ? config.lastComplete : Date.now(), lastAttempt: attempt, coverage: coverageHash, missing, issues, message: missing ? `案件データ保存済み。原本${missing}件が未保存です（全体バックアップ未完了）。` : '案件データ・登録済み原本の保存と読戻し検証が完了しました。Driveの同期完了は別途確認してください。' });
     } catch (error) {
       await saveConfig({ ...config, lastAttempt: attempt, message: `バックアップ未完了：${error instanceof Error ? error.message : String(error)}` });
-    }
+    } finally { setRunning(false); }
   });
 }
 const RESTORE = `Cockpit 自動バックアップ\n01の最新のJSONをCockpit設定のバックアップ読込から選び、保存時の金庫パスフレーズで復元してください。パスフレーズはこのフォルダーとは別に保管してください。\n02には暗号化していない録音・動画原本と検証用JSONを保存します。原本は該当案件の録音・動画から再取り込みできます（別の録音として追加されます）。\n03の日付別検証記録でmissingOriginalsが0か確認してください。0以外なら原本の再選択が必要です。\nMacの故障に備え、Google Driveのアップロード完了を確認してください。アプリはクラウドへの転送完了までは確認できません。\n自動保存はこのMacでCockpitを開いて解錠している間に24時間ごと。閉じている間・スリープ中は保存されず、次回解錠時に再開します。世代の自動削除は行いません。\nブラウザー内の未同期データを含む案件情報と登録済み録音・動画を対象にします。Mac全体、他アプリ、登録していないファイル、ログイン用秘密情報は対象外です。\n`;

@@ -1,8 +1,9 @@
 const {chromium}=require('@playwright/test');const fs=require('node:fs'),{spawn}=require('node:child_process');
 (async()=>{const entry='backup-test.tsx',html='backup-test.html';fs.writeFileSync(html,'<script type="module" src="/backup-test.tsx"></script>');fs.writeFileSync(entry,`
+import '/src/web/styles.css';
 import {CaseRecordings} from '/src/web/pages/case/recordings.tsx';
 import React from 'react';import {createRoot} from 'react-dom/client';
-import {AutomaticBackupRunner,AutomaticBackupSettings} from '/src/web/components/automatic-backup.tsx';
+import {AutomaticBackupRunner,AutomaticBackupSettings,BackupBadge} from '/src/web/components/automatic-backup.tsx';
 import {idb} from '/src/web/lib/store/idb.ts';
 import * as backup from '/src/web/lib/backup/automatic.ts';
 import {vaultStore as store} from '/src/web/lib/store/vault-store.ts';
@@ -17,12 +18,12 @@ await store.initializeEmpty(keys.vaultKey,keys.macKey,state);store.setBackupKdf(
 await store.saveMediaBlob(media.id,new Blob(['hello audio!']));const dir=await navigator.storage.getDirectory();window.showDirectoryPicker=async()=>dir;
 Object.assign(window,{backup,store,dir,recoverPortableBackup,idb,ready:true});
 const container=document.createElement('div');document.body.append(container);const root=createRoot(container);
-window.renderBackup=(key=0)=>root.render(<React.Fragment key={key}><AutomaticBackupRunner/><AutomaticBackupSettings/></React.Fragment>);
+window.renderBackup=(key=0)=>root.render(<React.Fragment key={key}><BackupBadge onOpenSettings={()=>window.settingsOpened=true}/><AutomaticBackupRunner/><AutomaticBackupSettings/></React.Fragment>);
 window.renderBackup();window.renderRecordings=()=>root.render(<CaseRecordings/>);`);
 const server=spawn('node',['node_modules/vite/bin/vite.js','--host','127.0.0.1','--port','4187'],{stdio:'ignore'});let browser;try{
 for(let i=0;i<80;i++){try{if((await fetch('http://127.0.0.1:4187/backup-test.html')).ok)break;}catch{}await new Promise(r=>setTimeout(r,100));}
 browser=await chromium.launch({executablePath:process.env.BENCH_CHROMIUM,args:['--no-sandbox']});const page=await browser.newPage();page.on('pageerror',console.error);
-await page.route('**/src/web/hooks/use-vault.tsx',route=>route.fulfill({contentType:'application/javascript',body:`import React from '/node_modules/.vite/deps/react.js';export function useVault(){const s=window.store;React.useSyncExternalStore(f=>s.subscribe(f),()=>s.getRevision());return {phase:s.getState()?'unlocked':'locked',state:s.getState()?{...s.getState()}:null,mutate:s.mutate.bind(s),saveMediaBlob:s.saveMediaBlob.bind(s),readMediaBlob:s.readMediaBlob.bind(s),deleteMediaBlob:s.deleteMediaBlob.bind(s)}}`}));
+await page.route('**/src/web/hooks/use-vault.tsx',route=>route.fulfill({contentType:'application/javascript',body:`import React from '/node_modules/.vite/deps/react.js';export function useVault(){const s=window.store;React.useSyncExternalStore(f=>s.subscribe(f),()=>s.getRevision());return {revision:s.getRevision(),phase:s.getState()?'unlocked':'locked',state:s.getState()?{...s.getState()}:null,mutate:s.mutate.bind(s),saveMediaBlob:s.saveMediaBlob.bind(s),readMediaBlob:s.readMediaBlob.bind(s),deleteMediaBlob:s.deleteMediaBlob.bind(s)}}`}));
 await page.goto('http://127.0.0.1:4187/backup-test.html');await page.waitForFunction(()=>window.ready);
 console.log(await page.evaluate(async()=>{
 await backup.chooseBackupFolder();await backup.runBackup(true);let config=await backup.getBackupConfig();if(config.missing!==1)throw Error(config.message);
@@ -57,6 +58,22 @@ if(await page.getByRole('button',{name:'バックアップ通知を閉じる'}).
 await page.getByRole('list',{name:'未保存の原本'}).getByText('sample.wav',{exact:true}).waitFor();
 await page.evaluate(async()=>{const c=await backup.getBackupConfig();await idb.setMeta('automatic-backup-v1',{...c,message:'バックアップ未完了：別の障害'});window.dispatchEvent(new Event('cockpit-backup'));});
 await page.getByRole('button',{name:'バックアップ通知を閉じる'}).waitFor();
+await page.evaluate(async()=>{await backup.archiveOriginal(store.getState().cases[0].recordings[1],new File(['hello audio!'],'sample.wav'));await backup.runBackup(true);});
+await page.getByRole('button',{name:'バックアップ済み：今すぐバックアップ',exact:true}).waitFor();
+await page.evaluate(()=>store.mutate(s=>{s.cases[0].name='changed backup test';}));
+await page.getByRole('button',{name:'未バックアップ：今すぐバックアップ',exact:true}).click();
+await page.getByRole('button',{name:'バックアップ済み：今すぐバックアップ',exact:true}).waitFor();
+await page.evaluate(()=>window.renderBackup(2));
+await page.getByRole('button',{name:'バックアップ済み：今すぐバックアップ',exact:true}).waitFor();
+await page.evaluate(async()=>{const original=store.sealBackup.bind(store);store.sealBackup=async payload=>{await store.mutate(s=>{s.cases[0].name='edited while saving';});return original(payload);};await backup.runBackup(true);store.sealBackup=original;});
+await page.getByRole('button',{name:'未バックアップ：今すぐバックアップ',exact:true}).waitFor();
+console.log({editDuringSaveRemainsPending:true});
+const border=await page.getByLabel('原本をまとめて補完').evaluate(el=>getComputedStyle(el).borderTopWidth);
+if(parseFloat(border)<1)throw Error('file picker lacks visible border');
+await page.evaluate(async()=>{window.savedPermission=FileSystemDirectoryHandle.prototype.queryPermission;FileSystemDirectoryHandle.prototype.queryPermission=async()=> 'denied';await backup.runBackup(true);});
+await page.getByRole('button',{name:'バックアップ要確認：今すぐバックアップ',exact:true}).waitFor();
+await page.evaluate(()=>{FileSystemDirectoryHandle.prototype.queryPermission=window.savedPermission;});
+console.log({backupBadgeSaved:true,editTurnsPending:true,oneClickEncryptedBackup:true,remountFingerprint:true,failedBadge:true});
 await page.evaluate(()=>window.renderRecordings());
 await page.locator('input[type=file]').first().waitFor({state:'attached'});
 const beforeImport=await page.evaluate(()=>store.getState().cases[0].recordings.length);

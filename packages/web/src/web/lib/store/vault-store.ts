@@ -190,6 +190,14 @@ export class VaultStore {
     if (!this.isUnlocked() || !this.backupKdf) throw new Error("バックアップの鍵情報がありません。再度解錠してください");
     return { ...this.backupKdf };
   }
+  async backupFingerprint(state: VaultState): Promise<string> {
+    const epoch = this.epoch;
+    const key = this.macKey;
+    if (!key || !this.key) throw new Error("金庫が施錠されています");
+    const result = await hmacHex(key, 'cc-backup-state-v1|' + JSON.stringify(state));
+    this.assertSession(epoch);
+    return result;
+  }
   private assertSession(epoch: number): void {
     if (!this.key || epoch !== this.epoch) throw new Error("金庫の状態が変わりました。再度解錠してください");
   }
