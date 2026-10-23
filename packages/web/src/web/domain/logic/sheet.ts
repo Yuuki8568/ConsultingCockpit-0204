@@ -1,3 +1,4 @@
+import { legacyNetToGross } from "./pricing";
 // 元アプリ v3 のヒアリングシート生成ロジックを移植
 //
 // 【v3 からの修正】role の値は 'executive' だが質問バンクの weight キーは 'exec' のため、
@@ -146,7 +147,7 @@ export function generateProposalSkeleton(
     : "";
 
   out.cost = stageDef
-    ? `推奨メニュー: ${stageDef.name}\n価格レンジ: ¥${stageDef.lo.toLocaleString()} 〜 ¥${stageDef.std.toLocaleString()}（標準） 〜 ¥${stageDef.hi.toLocaleString()}\n根拠: ${stageDef.why}\n上振れ条件: ${stageDef.upCond}\n月額継続切替時: ${stageDef.monthly}\n\n※ ROI非保証（免責事項第3版 第6条準拠）。成果保証はしない。`
+    ? `推奨メニュー: ${stageDef.name}\n価格レンジ（税込）: ¥${legacyNetToGross(stageDef.lo).toLocaleString()} 〜 ¥${legacyNetToGross(stageDef.std).toLocaleString()}（標準） 〜 ¥${legacyNetToGross(stageDef.hi).toLocaleString()}\n根拠: ${stageDef.why}\n上振れ条件: ${stageDef.upCond}\n月額継続切替時: ${stageDef.monthly}\n\n※ ROI非保証（免責事項第3版 第6条準拠）。成果保証はしない。`
     : "（④単価設計タブで提案価格を確定すると自動反映）";
 
   out.schedule =

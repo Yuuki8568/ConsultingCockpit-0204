@@ -12,7 +12,7 @@ import {
 import { DOC_TYPE_DEFS } from "../../domain/data/doc-templates";
 import { MATURITY_AXES } from "../../domain/data/diagnosis-legal";
 import { calculateROI, computeCaseProgress } from "../../domain/logic/case";
-import { formatYen } from "../../domain/logic/pricing";
+import { formatYen, legacyNetToGross } from "../../domain/logic/pricing";
 import { safeFileName } from "../../domain/logic/util";
 import type { CaseRecord, VaultState } from "../../domain/types";
 import { downloadWordSections, printSections, type WordSection } from "./word";
@@ -141,7 +141,7 @@ export async function exportCaseXlsx(c: CaseRecord, _state: VaultState): Promise
       rows: [
         ["案件名", pi.projectTitle],
         ["想定総工数(h)", pi.hours],
-        ["時間単価(円)", pi.baseline],
+        ["時間単価(税込円)", legacyNetToGross(pi.baseline)],
         ["難易度", (DIFFICULTY_LABELS as Record<string, string>)[String(pi.difficulty)] ?? ""],
         ["急ぎ度", (URGENCY_LABEL as Record<string, string>)[pi.urgency] ?? ""],
         ["クライアント規模", (CLIENT_SIZE_LABEL as Record<string, string>)[pi.clientSize] ?? ""],
@@ -151,16 +151,16 @@ export async function exportCaseXlsx(c: CaseRecord, _state: VaultState): Promise
             .map((d) => (DELIVERABLE_LABELS as Record<string, string>)[d] ?? d)
             .join("、"),
         ],
-        ["基準額(円)", pr.base],
+        ["基準額(税込円)", legacyNetToGross(pr.base)],
         ["難易度係数", pr.difficultyCoef],
         ["急ぎ係数", pr.urgencyCoef],
         ["リスク係数", pr.riskCoef],
         ["規模係数", pr.sizeCoef],
         ["経験係数", pr.expCoef],
-        ["成果物加算(円)", Math.round(pr.deliverableAdd)],
-        ["堅実プラン(円)", pr.safe],
-        ["推奨プラン(円)", pr.recommended],
-        ["挑戦プラン(円)", pr.challenge],
+        ["成果物加算(税込円)", legacyNetToGross(pr.deliverableAdd)],
+        ["堅実プラン(税込円)", legacyNetToGross(pr.safe)],
+        ["推奨プラン(税込円)", legacyNetToGross(pr.recommended)],
+        ["挑戦プラン(税込円)", legacyNetToGross(pr.challenge)],
         ["見積 税込(円)", c.estimate.totalIncTax],
         ["見積 有効期限", c.estimate.validUntil],
         ["支払期日", c.invoice.dueDate],
@@ -300,11 +300,11 @@ function buildSections(c: CaseRecord): WordSection[] {
     out.push({
       heading: "金額",
       table: {
-        head: ["プラン", "金額（税抜）"],
+        head: ["プラン", "金額（税込）"],
         rows: [
-          ["堅実", `¥${formatYen(pr.safe)}`],
-          ["推奨", `¥${formatYen(pr.recommended)}`],
-          ["挑戦", `¥${formatYen(pr.challenge)}`],
+          ["堅実", `¥${formatYen(legacyNetToGross(pr.safe))}`],
+          ["推奨", `¥${formatYen(legacyNetToGross(pr.recommended))}`],
+          ["挑戦", `¥${formatYen(legacyNetToGross(pr.challenge))}`],
         ],
         numCols: [1],
       },

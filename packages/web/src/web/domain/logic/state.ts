@@ -1,5 +1,6 @@
 // 金庫内 state の生成・後方互換補完。v3 の makeEmptyState / normalizeState を移植。
 // v3 JSON をそのまま normalizeVaultState に通せば v4 で開ける。
+import { APPROVED_TERMS_VERSION } from "../data/approved-terms";
 import { BUILT_IN_TEMPLATES } from "../data/doc-templates";
 import type { CaseRecord, LeadRecord, VaultState } from "../types";
 import { newId, nowISO } from "./util";
@@ -40,6 +41,7 @@ export function makeEmptyVaultState(): VaultState {
 export function makeEmptyCase(companyName = ""): CaseRecord {
   const c = {
     id: newId("C"),
+    contractTemplateVersion: APPROVED_TERMS_VERSION,
     createdAt: nowISO(),
     name: companyName,
     settings: {

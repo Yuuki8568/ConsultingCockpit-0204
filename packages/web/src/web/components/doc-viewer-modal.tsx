@@ -33,11 +33,12 @@ export function DocViewerModal() {
       wide
       footer={
         <>
-          <CopyButton text={content} label="本文をコピー" />
+          {!doc.releaseBlocked && <CopyButton text={content} label="本文をコピー" />}
           <button
             className="btn btn-primary btn-sm"
+            disabled={Boolean(doc.releaseBlocked)}
             onClick={() =>
-              downloadWord({
+              !doc.releaseBlocked && downloadWord({
                 title: doc.title,
                 docNo: doc.docNo,
                 body: content,
@@ -51,6 +52,7 @@ export function DocViewerModal() {
       }
     >
       <div className="space-y-3">
+        {doc.releaseBlocked && <Note tone="warn">{doc.releaseBlocked} この書類は現時点では画面内レビュー専用です。本文編集だけでは解除されません。</Note>}
         {missing.length > 0 && (
           <Note tone="warn">
             空欄が {missing.length} か所あります（［要入力:…］と表示されている部分）。
@@ -59,11 +61,12 @@ export function DocViewerModal() {
         )}
         <textarea
           className="field font-body max-h-[58vh] min-h-[380px] resize-y text-[13px] leading-[1.9]"
+          readOnly={doc.readOnly}
           value={content}
           onChange={(e) => docViewer.setContent(e.target.value)}
         />
         <p className="text-[11px] text-paper-faint">
-          ここで直した内容は保存されます。雛形そのものを直したい場合は、設定画面の書類雛形から編集してください。
+          {doc.readOnly ? "締結済み本文のため閲覧・出力のみです。" : doc.templateVersion ? `版 ${doc.templateVersion}。本文の編集は保存されますが、案件条件の不足は案件条件・情報管理票で確認後に再生成してください。公開版が変わってもこの本文は自動更新しません。` : "ここで直した内容は保存されます。旧版雛形そのものを直す場合は、設定画面の書類雛形から編集してください。"}
         </p>
       </div>
     </Modal>

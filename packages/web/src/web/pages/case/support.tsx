@@ -17,8 +17,9 @@ import {
   Stat,
 } from "../../components/kit";
 import { Mask } from "../../components/mask";
+import { monthlyRenewalDates } from "../../domain/logic/renewal";
 import { calcNextBillingAlert } from "../../domain/logic/case";
-import { formatYen } from "../../domain/logic/pricing";
+import { formatYen, legacyNetToGross, grossToLegacyNet } from "../../domain/logic/pricing";
 import { MSG_TEMPLATES } from "../../domain/data/templates-msg";
 import { fillTemplate, gatherTemplateContext } from "../../domain/logic/docs";
 import type { Support } from "../../domain/types";
@@ -55,14 +56,14 @@ const SCOPE_PRESETS = {
   ],
 };
 
-function emptySupport(): Support {
+function emptySupport(newTerms = false): Support {
   return {
     contract: {
       startDate: "",
       endDate: "",
       monthlyFee: 0,
       autoRenew: "1m",
-      noticeDays: 30,
+      noticeDays: newTerms ? 1 : 30,
       billingDay: "",
     },
     meetings: [],
@@ -120,7 +121,7 @@ export function CaseSupport() {
   const sp = c.support;
   const setSp = (fn: (s: Support) => void) =>
     void patch((x) => {
-      if (!x.support) x.support = emptySupport();
+      if (!x.support) x.support = emptySupport(Boolean(c.contractTemplateVersion));
       fn(x.support);
     });
 
@@ -128,7 +129,7 @@ export function CaseSupport() {
     // 月額プランで見積が確定しているなら、月額の既定値（税抜換算）を入れて始める。手で直せる
     const feeDefault =
       c.plan === "monthly" && (c.estimate?.totalIncTax ?? 0) > 0
-        ? Math.round((c.estimate?.totalIncTax ?? 0) / 1.1)
+        ? grossToLegacyNet(c.estimate?.totalIncTax ?? 0)
         : 0;
     return (
       <Panel title="継続サポート" note="伴走を月額に切り替えるときは、ここから始めます。">
@@ -137,7 +138,7 @@ export function CaseSupport() {
           {feeDefault > 0 && (
             <>
               <br />
-              ④で確定した見積（税込 {c.estimate.totalIncTax.toLocaleString("ja-JP")} 円）から、月額の既定値として税抜 {feeDefault.toLocaleString("ja-JP")} 円を入れて始めます。違えばあとで直してください。
+              ④で確定した見積（税込 {c.estimate.totalIncTax.toLocaleString("ja-JP")} 円）から、月額の既定値として税込 {legacyNetToGross(feeDefault).toLocaleString("ja-JP")} 円を入れて始めます。違えばあとで直してください。
             </>
           )}
           <br />
@@ -156,18 +157,20 @@ export function CaseSupport() {
     );
   }
 
-  const billing = calcNextBillingAlert(sp.contract);
+  const billing = c.contractTemplateVersion ? null : calcNextBillingAlert(sp.contract);
+  const todayJst = new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Tokyo", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+  const renewal = c.contractTemplateVersion ? monthlyRenewalDates(sp.contract.startDate, todayJst) : null;
   const achieved = Object.values(sp.roadmap).filter((r) => r.achieved).length;
 
   return (
     <div className="space-y-4">
-      <Panel title="月額契約" note="永久契約にはしません。初回6ヶ月・更新3ヶ月を基本にしています。">
+      <Panel title="月額契約" note={c.contractTemplateVersion ? "新規版：1ヶ月単位・開始日の応当日更新。更新停止は前日23:59（日本時間）まで。入金確認後、合意・通知した開始日から有料業務を始めます。" : "既存契約の保存内容を表示しています。期間や更新条件は締結済みの合意をご確認ください。"}>
         <Grid cols={3}>
           <NumField
             label="月額"
-            value={sp.contract.monthlyFee}
-            onChange={(v) => setSp((s) => void (s.contract.monthlyFee = v))}
-            suffix="円（税抜）"
+            value={legacyNetToGross(sp.contract.monthlyFee)}
+            onChange={(v) => setSp((s) => void (s.contract.monthlyFee = grossToLegacyNet(v)))}
+            suffix="円（税込）"
             step={10000}
           />
           <Field
@@ -178,7 +181,7 @@ export function CaseSupport() {
               setSp((s) => {
                 s.contract.startDate = v;
                 // 終了日が空のときだけ、基本の「初回6ヶ月」に沿って自動で入れる。手で直せる
-                if (v && !s.contract.endDate) {
+                if (v && !s.contract.endDate && !c.contractTemplateVersion) {
                   const end = plus6Months(v);
                   if (end) s.contract.endDate = end;
                 }
@@ -190,8 +193,9 @@ export function CaseSupport() {
             type="date"
             value={sp.contract.endDate}
             onChange={(v) => setSp((s) => void (s.contract.endDate = v))}
-            hint="空欄のとき開始日を入れると6ヶ月後が自動で入ります。違えば直してください。"
+            hint={c.contractTemplateVersion ? "新規版は期間を確認して入力してください。既存契約の日付は変更しません。" : "旧版の既定値は6ヶ月後です。実際の契約内容を確認してください。"}
           />
+          {!c.contractTemplateVersion && <>
           <Select
             label="自動更新"
             value={sp.contract.autoRenew}
@@ -212,8 +216,17 @@ export function CaseSupport() {
             mono
             hint="毎月の日付（1〜31）を入れると、次の請求日を出します。"
           />
+          </>}
         </Grid>
 
+        {c.contractTemplateVersion && <div className="mt-3">
+          <Note tone="warn">新版の条件は1ヶ月更新・次期更新日の前日23:59（日本時間）まで停止可能です。旧管理欄の予告日数・請求日・更新間隔は使用しません。下記は日付の目安であり、自動請求・自動更新・入金確認は行いません。請求遅れ等の未確定条件は確認が必要です。</Note>
+          {renewal ? <Grid cols={3}>
+            <Stat label="次期更新日" value={renewal.renewalDate} />
+            <Stat label="次期分の請求日" value={renewal.invoiceDate} />
+            <Stat label="次期更新の停止期限" value={renewal.stopDeadlineJst} />
+          </Grid> : <p className="text-sm">合意・通知した開始日を確認して入力すると、応当日から日付を算出します。</p>}
+        </div>}
         {billing && (
           <div className="mt-3">
             <Grid cols={2}>
@@ -225,8 +238,8 @@ export function CaseSupport() {
               />
               <Stat
                 label="年間の見込み"
-                value={<Mask>¥{formatYen(sp.contract.monthlyFee * 12)}</Mask>}
-                sub="税抜・12ヶ月換算"
+                value={<Mask>¥{formatYen(legacyNetToGross(sp.contract.monthlyFee) * 12)}</Mask>}
+                sub="税込・12ヶ月換算"
               />
             </Grid>
           </div>
@@ -234,7 +247,7 @@ export function CaseSupport() {
 
         <div className="mt-3">
           <Note tone="info">
-            支払いは前払い（当該月の開始前に請求・入金確認後にその月のサポートを開始）が基本です。後払いに変える場合、支払期日は給付を受領した日から起算します。検収日を起算日にすると取適法に触れます。
+            支払いは前払いです。入金確認後、合意・通知した開始日から有料業務を始めます。支払条件の変更や法令上の取扱いは案件ごとに確認し、未確認の条件を自動適用しません。
           </Note>
         </div>
       </Panel>
