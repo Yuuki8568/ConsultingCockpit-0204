@@ -14,7 +14,7 @@ const path=require('node:path');
   browser=await chromium.launch({executablePath:process.env.BENCH_CHROMIUM,headless:true,args:['--no-sandbox']});
   const page=await browser.newPage();
   for(let i=0;i<60;i++){try{await page.goto('http://127.0.0.1:4181/review-harness.html');break;}catch(e){if(i===59)throw e;await new Promise(r=>setTimeout(r,250));}}
-  const fixture={format:'cockpit-transcript-review',version:1,sourceName:'面談.mp4',reviewedAt:new Date().toISOString(),segments:[{start:0,end:2,original:'予算は未定です。',text:'予算はまだ未定です。',reviewed:true}]};
+  const fixture={format:'cockpit-transcript-review',version:2,recognition:{mode:'accurate',model:'Systran/faster-whisper-medium',revision:'08e178d48790749d25932bbc082711ddcfdfbc4f'},sourceName:'面談.mp4',reviewedAt:new Date().toISOString(),segments:[{start:0,end:2,original:'予算は未定です。',text:'予算はまだ未定です。',reviewed:true}]};
   const input=page.locator('input[type=file]');const save=page.getByRole('button',{name:'取り込む',exact:true});
   await input.setInputFiles({name:'review.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(fixture))});
   await page.getByText('元の録音名:',{exact:false}).waitFor();
