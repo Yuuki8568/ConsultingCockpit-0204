@@ -36,6 +36,7 @@ import {
   type AutofillEntry,
 } from "../../domain/logic/recording";
 import { LOCAL_MEDIA_BYTES, validateMedia } from "../../lib/transcription/limits";
+import { parseTranscriptReview, MAX_REVIEW_BYTES, type TranscriptReview } from "../../lib/transcription/review";
 import { transcribeLocal } from "../../lib/transcription/local";
 import type { CaseRecord, RecordingMeta } from "../../domain/types";
 
@@ -126,6 +127,7 @@ export function CaseRecordings() {
           target.transcription = checkpoint;
           target.transcriptName = checkpoint.completedSeconds >= checkpoint.totalSeconds
             ? "端末内文字起こし（日本語・要確認）" : "端末内文字起こし（途中まで・再開できます）";
+          delete target.transcriptReview;
           target.transcriptAt = new Date().toISOString();
           expected = text;
         });
@@ -444,11 +446,12 @@ export function CaseRecordings() {
         <TranscriptModal
           rec={list.find((z) => z.id === transcriptFor) ?? null}
           onClose={() => setTranscriptFor(null)}
-          onSave={(id, name, text) => {
+          onSave={(id, name, text, review) => {
             void patch((x) => {
               const t = x.recordings?.find((z) => z.id === id);
               if (t) {
                 delete t.transcription;
+                t.transcriptReview = review;
                 t.transcriptName = name;
                 t.transcript = text;
                 t.transcriptAt = new Date().toISOString();
@@ -470,17 +473,22 @@ export function CaseRecordings() {
 }
 
 /** 文字起こしの取り込み（ファイルまたは貼り付け） */
-function TranscriptModal({
+export function TranscriptModal({
   rec,
   onClose,
   onSave,
 }: {
   rec: RecordingMeta | null;
   onClose: () => void;
-  onSave: (id: string, name: string, text: string) => void;
+  onSave: (id: string, name: string, text: string, review?: TranscriptReview) => void;
 }) {
   const [text, setText] = useState(rec?.transcript ?? "");
   const [name, setName] = useState(rec?.transcriptName ?? "");
+  const [review, setReview] = useState<TranscriptReview | undefined>(rec?.transcriptReview);
+  const [confirmed, setConfirmed] = useState(false);
+  const [error, setError] = useState("");
+  const readId = useRef(0);
+  useEffect(() => () => { readId.current++; }, []);
   const fileRef = useRef<HTMLInputElement>(null);
   if (!rec) return null;
 
@@ -497,8 +505,8 @@ function TranscriptModal({
           </button>
           <button
             className="btn btn-primary btn-sm"
-            disabled={!text.trim()}
-            onClick={() => onSave(rec.id, name, text.trim())}
+            disabled={!text.trim() || !!error || (!!review && !confirmed)}
+            onClick={() => onSave(rec.id, name, text.trim(), review)}
           >
             取り込む
           </button>
@@ -507,27 +515,34 @@ function TranscriptModal({
     >
       <div className="space-y-3">
         <p className="text-[12px] leading-relaxed text-paper-dim">
-          Google Meet の文字��こし（.vtt / .sbv など）やテキストを取り込みます。タイムスタンプは自動で除きます。
+          端末内補助ツールの確認済みJSON、字幕、テキストを取り込みます。取り込む前に対象の録音と内容を確認してください。
         </p>
         <input
           ref={fileRef}
           type="file"
-          accept={TRANSCRIPT_ACCEPT}
+          accept={TRANSCRIPT_ACCEPT + ",.json"}
           className="hidden"
           onChange={(e) => {
             const f = e.target.files?.[0];
             e.target.value = "";
             if (!f) return;
-            if (!isTranscriptFile(f.name)) return;
+            const id = ++readId.current;
+            setError("");
+            if (f.size > MAX_REVIEW_BYTES) { setError("2MB以下の文字起こしファイルを選択してください。"); return; }
+            if (!isTranscriptFile(f.name) && !f.name.toLowerCase().endsWith(".json")) return;
             void f.text().then((raw) => {
-              setText(parseTranscript(raw, f.name));
-              setName(f.name);
+              if (readId.current !== id) return;
+              const parsed = f.name.toLowerCase().endsWith(".json") ? parseTranscriptReview(raw) : undefined;
+              setText(parsed ? parsed.importedText : parseTranscript(raw, f.name));
+              setReview(parsed); setConfirmed(false); setName(f.name);
+            }).catch((err: unknown) => {
+              if (readId.current === id) setError(err instanceof Error ? err.message : "ファイルを読み込めませんでした。");
             });
           }}
         />
         <div className="flex flex-wrap items-center gap-2">
           <button className="btn btn-sm" onClick={() => fileRef.current?.click()}>
-            ファイルから取り込む（vtt / srt / sbv / txt）
+            ファイルから取り込む（確認済みJSON / 字幕 / txt）
           </button>
           {name && <span className="text-[11px] text-paper-faint">{name}</span>}
           {text && (
@@ -536,10 +551,17 @@ function TranscriptModal({
             </span>
           )}
         </div>
+        {error && <p role="alert" className="text-sm text-red-400">{error}</p>}
+        {review && <div className="space-y-2 text-sm">
+          <p>元の録音名: {review.sourceName} ／ {review.segments.length}区間を確認済み</p>
+          <details><summary>補正前の認識文を確認</summary><pre className="whitespace-pre-wrap text-xs">{review.originalText}</pre></details>
+          <label className="flex gap-2"><input type="checkbox" checked={confirmed} onChange={e => setConfirmed(e.target.checked)} />この案件の「{rec.name}」に対応する内容であることを確認しました</label>
+          <p className="text-xs">原文も案件内に保存します。予算・日付・決定事項への反映は、設問の下書き画面で別途確認してください。</p>
+        </div>}
         <Area
           label="文字起こし本文（直接貼り付けもできます）"
           value={text}
-          onChange={setText}
+          onChange={(value) => { readId.current++; setText(value); setConfirmed(false); }}
           rows={14}
         />
       </div>

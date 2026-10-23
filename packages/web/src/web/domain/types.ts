@@ -675,6 +675,7 @@ export interface RecordingMeta {
   /** 文字起こし本文（タイムスタンプ除去済みの平文） */
   transcript: string;
   transcriptAt: string;
+  transcriptReview?: import("../lib/transcription/review").TranscriptReview;
 }
 
 export type CaseStatus = "" | "active" | "paused" | "done" | "lost";

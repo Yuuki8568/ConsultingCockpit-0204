@@ -17,12 +17,13 @@ const { createServer } = require('node:http');
     });
     await new Promise(resolve => modelServer.listen(0, '127.0.0.1', resolve));
   }
-  const browser = await chromium.launch({ headless: true, dumpio: process.env.BENCH_DEBUG === '1', args: ['--no-sandbox'] });
+  const browser = await chromium.launch({ executablePath: process.env.BENCH_CHROMIUM || undefined, headless: true, dumpio: process.env.BENCH_DEBUG === '1', args: ['--no-sandbox'] });
   try {
     const page = await browser.newPage();
+    await page.exposeFunction('persistCheckpoint', row => fs.writeFileSync(process.env.BENCH_RESULT + '.checkpoint.json', JSON.stringify(row, null, 2)));
     await page.route('**/speech-bench', r => r.fulfill({ contentType: 'text/html', body: '<input type="file">' }));
     if (process.env.TRANSCRIPTION_MODEL_DIR) await page.route('https://huggingface.co/**', async route => {
-      const match = new URL(route.request().url()).pathname.match(/^\/onnx-community\/whisper-(?:tiny|base|small)\/resolve\/[a-f0-9]{40}\/(.+)$/);
+      const match = new URL(route.request().url()).pathname.match(/^\/onnx-community\/(?:whisper-(?:tiny|base|small)|kotoba-whisper-v2.2-ONNX)\/resolve\/[a-f0-9]{40}\/(.+)$/);
       const relative = match?.[1];
       if (!allowed.includes(relative)) return route.fulfill({ status: 404, body: 'missing' });
       // Stream large model bytes over loopback instead of copying them through CDP/base64.
@@ -42,6 +43,7 @@ const { createServer } = require('node:http');
             savedText = text;
             const row = { audioSeconds: checkpoint.completedSeconds, wallSeconds: (performance.now() - started) / 1000, characters: text.length };
             checkpoints.push(row);
+            await window.persistCheckpoint({ checkpoints, text, checkpoint });
             console.log('BENCH_PROGRESS ' + JSON.stringify(row));
           },
         });
