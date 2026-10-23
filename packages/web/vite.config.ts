@@ -8,20 +8,8 @@ import assetOptimizerPlugin from "./vite/__plugins/asset-optimizer-plugin";
 
 const root = path.resolve(__dirname, "../..");
 
-/**
- * 本番ビルドの CSP。
- * 開発時は HMR（ws:）と react-refresh のインライン導入が要るため緩いままにし、
- * ビルド成果物だけを厳しくする。
- *  - script-src は 'self' のみ（インライン・eval なし。
- *    枠対策は /frameguard.js、計測は /runable.js と、どちらも外部ファイル）
- *  - connect-src は自分自身と、サインイン基盤・計測の送信先だけ
- *  - style-src の 'unsafe-inline' は画面部品の style 属性が使うため残す
- */
-const PROD_CSP =
-	"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; " +
-	"img-src 'self' data: blob:; media-src 'self' blob:; " +
-	"connect-src 'self'; " +
-	"frame-src 'self'; form-action 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'";
+import { CSP as PROD_CSP } from './src/security-headers';
+import { transcriptionRuntime } from './vite/transcription-runtime';
 
 /** ビルド成果物の CSP メタを本番用に差し替える */
 function strictCspPlugin(): Plugin {
@@ -48,7 +36,8 @@ export default defineConfig(({ mode }) => {
 		// All env files live at the repo root — keep Vite's own env loading there too,
 		// so packages/web/.env* files can never shadow the root .env.
 		envDir: root,
-		plugins: [react(), tailwind(), assetOptimizerPlugin(), strictCspPlugin()],
+		worker: { format: "es" },
+		plugins: [transcriptionRuntime(), react(), tailwind(), assetOptimizerPlugin(), strictCspPlugin()],
 		resolve: {
 			alias: {
 				"@": path.resolve(__dirname, "./src/web"),
