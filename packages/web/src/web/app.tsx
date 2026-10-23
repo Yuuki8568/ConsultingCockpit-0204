@@ -4,9 +4,12 @@ import { Provider } from "./components/provider";
 import { DocViewerModal } from "./components/doc-viewer-modal";
 
 
+import { AutomaticBackupRunner } from "./components/automatic-backup";
+
 function App() {
   return (
     <Provider>
+      <AutomaticBackupRunner />
       <Switch>
         <Route path="/" component={Index} />
       </Switch>

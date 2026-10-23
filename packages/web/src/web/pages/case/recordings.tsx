@@ -6,6 +6,7 @@
  *   その内容から ⑤・② の設問の下書きを作るためのプロンプトを生成する
  * - AIの出力を貼り戻すと、空欄の項目にだけ下書きを入れる（判断は人が行う）
  */
+import { archiveOriginal } from "../../lib/backup/automatic";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useCurrentCase } from "../../hooks/use-current";
 import { useVault } from "../../hooks/use-vault";
@@ -147,6 +148,8 @@ export function CaseRecordings() {
           x.recordings = x.recordings ?? [];
           x.recordings.push(meta);
         });
+        try { await archiveOriginal(meta, f); }
+        catch (error) { setImportError(`録音は登録済みですが原本バックアップ未完了：${error instanceof Error ? error.message : String(error)}。設定から原本を再選択してください。`); }
         if (connected) {
           // The media is already registered. A recognition failure must not delete its stored blob.
           const controller = new AbortController();
