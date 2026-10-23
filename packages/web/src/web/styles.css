@@ -155,7 +155,7 @@
   /* ボタン —— 主要アクションは1画面に1つだけ */
   .btn {
     @apply inline-flex cursor-pointer items-center justify-center gap-1.5 rounded-sm border
-           border-line bg-ink-700 px-3 py-1.5 text-[13px] font-medium text-paper
+           border-line-strong bg-ink-700 px-3 py-1.5 text-[13px] font-medium text-paper
            transition-colors duration-100 select-none;
   }
   .btn:hover {
@@ -176,7 +176,7 @@
   }
   .btn-ghost {
     background: transparent;
-    border-color: transparent;
+    border-color: var(--color-line-strong);
     color: var(--color-paper-dim);
   }
   .btn-ghost:hover {
@@ -302,5 +302,30 @@
 
   .no-scrollbar::-webkit-scrollbar {
     display: none;
+  }
+}
+
+/* Keep native file selection and keyboard actions visibly discoverable. */
+@layer base {
+  input[type="file"] {
+    max-width: 100%;
+    border: 1px solid var(--color-brand-hi);
+    border-radius: 6px;
+    padding: 8px;
+    background: var(--color-ink-800);
+  }
+  input[type="file"]::file-selector-button {
+    border: 1px solid var(--color-brand-hi);
+    border-radius: 4px;
+    padding: 8px 12px;
+    margin-right: 12px;
+    background: var(--color-brand);
+    color: white;
+    cursor: pointer;
+  }
+  input[type="file"]:disabled { opacity: .45; }
+  button:focus-visible, input[type="file"]:focus-visible {
+    outline: 2px solid var(--color-brand-hi);
+    outline-offset: 3px;
   }
 }
