@@ -675,6 +675,7 @@ export interface RecordingMeta {
   /** 文字起こし本文（タイムスタンプ除去済みの平文） */
   transcript: string;
   transcriptAt: string;
+  localRecognition?: import("../lib/transcription/bridge").LocalTranscript;
   transcriptReview?: import("../lib/transcription/review").TranscriptReview;
 }
 

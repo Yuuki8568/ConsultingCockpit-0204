@@ -1,4 +1,4 @@
-export const CSP = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' https://huggingface.co https://*.xethub.hf.co https://cdn-lfs.huggingface.co https://cdn-lfs-us-1.hf.co https://us.aws.cdn.hf.co; frame-src 'self'; form-action 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'";
+export const CSP = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' http://127.0.0.1:8765 https://huggingface.co https://*.xethub.hf.co https://cdn-lfs.huggingface.co https://cdn-lfs-us-1.hf.co https://us.aws.cdn.hf.co; frame-src 'self'; form-action 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'";
 export function secureResponse(response: Response): Response {
   const headers = new Headers(response.headers);
   headers.set("Content-Security-Policy", CSP);

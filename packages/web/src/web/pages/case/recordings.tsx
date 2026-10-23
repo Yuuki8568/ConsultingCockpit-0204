@@ -37,6 +37,7 @@ import {
 } from "../../domain/logic/recording";
 import { LOCAL_MEDIA_BYTES, validateMedia } from "../../lib/transcription/limits";
 import { parseTranscriptReview, applyTranscriptImport, MAX_REVIEW_BYTES, type TranscriptReview } from "../../lib/transcription/review";
+import { connectLocal, transcribeLocal, applyLocalTranscript } from "../../lib/transcription/bridge";
 import type { CaseRecord, RecordingMeta } from "../../domain/types";
 
 /** 元ファイルから再生時間だけを拾う（本体は暗号化前に読まない） */
@@ -61,6 +62,10 @@ type PlayerState = { url?: string; busy?: boolean; err?: string };
 export function CaseRecordings() {
   const { c, patch } = useCurrentCase();
   const { phase, saveMediaBlob, readMediaBlob, deleteMediaBlob } = useVault();
+  const [connectionKey, setConnectionKey] = useState("");
+  const [connected, setConnected] = useState(false);
+  const [localStatus, setLocalStatus] = useState("");
+  const recognitionAbort = useRef<AbortController | null>(null);
   const [over, setOver] = useState(false);
   const [importing, setImporting] = useState<{ name: string; pct: number } | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
@@ -74,8 +79,9 @@ export function CaseRecordings() {
   current.current = { id: c?.id, phase };
   useEffect(() => {
     alive.current = true;
-    return () => { alive.current = false; stopImport.current = true; };
+    return () => { alive.current = false; stopImport.current = true; recognitionAbort.current?.abort(); };
   }, [c?.id, phase]);
+  useEffect(() => { setConnected(false); setConnectionKey(""); setLocalStatus(""); }, [c?.id, phase]);
   const importingRef = useRef(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const urlsRef = useRef<string[]>([]);
@@ -141,6 +147,20 @@ export function CaseRecordings() {
           x.recordings = x.recordings ?? [];
           x.recordings.push(meta);
         });
+        if (connected) {
+          // The media is already registered. A recognition failure must not delete its stored blob.
+          const controller = new AbortController();
+          recognitionAbort.current = controller;
+          try {
+            const result = await transcribeLocal(f, connectionKey, controller.signal, setLocalStatus);
+            if (!alive.current || stopImport.current || current.current.id !== caseId || current.current.phase !== "unlocked") break;
+            await patch((x) => applyLocalTranscript(x, id, result));
+            setLocalStatus("精密文字起こしを保存しました。原音と照合してから案件に反映してください。");
+          } catch (error) {
+            if (alive.current && current.current.id === caseId) setImportError(`録音は登録済みです。文字起こし: ${controller.signal.aborted ? "中止しました" : error instanceof Error ? error.message : "失敗しました"}。補助ツールの保存結果を手動で取り込むこともできます。`);
+          } finally { recognitionAbort.current = null; }
+        }
+
       } catch (e) {
         await deleteMediaBlob(id).catch(() => {});
         setImportError(
@@ -224,8 +244,23 @@ export function CaseRecordings() {
         録画・録音は事前に相手の同意を得てください。同意を得た日を各ファイルに記録できます。
       </Note>
 
-      <p className="mt-3 text-sm">文字起こしは精密モードに統一しています。端末内補助ツールで録音を処理し、原音を確認して書き出した「cockpit-reviewed.json」を各録音の「精密文字起こしを取り込む」から選択してください。</p>
-      <p className="mt-2 text-xs text-paper-faint">音声・動画は外部へ送信しません。確認した文章は案件データとして暗号化して保存・同期します。原本は別途保管してください。</p>
+      <div className="mt-3 space-y-2 rounded-sm border border-line p-3">
+        <p className="text-sm">精密モードで自動文字起こし</p>
+        <p className="text-xs text-paper-faint">初回は <a className="underline" href="/downloads/Cockpit-Local-Transcriber-Intel-Mac.zip" download>Mac用補助ツール</a> を展開して Setup.command を実行します。利用時は Connect-Cockpit.command を開き、表示された接続キーを貼り付けてください。</p>
+        <input aria-label="端末内の接続キー" type="password" autoComplete="off" value={connectionKey} disabled={connected || !!importing} onChange={e => setConnectionKey(e.target.value)} className="w-full rounded border border-line bg-ink-850 p-2" />
+        <button type="button" disabled={!connectionKey.trim() || !!importing} onClick={async () => {
+          if (connected) { setConnected(false); setConnectionKey(""); setLocalStatus(""); return; }
+          const controller = new AbortController(); recognitionAbort.current = controller;
+          try { await connectLocal(connectionKey.trim(), controller.signal); if (!controller.signal.aborted) { setConnectionKey(connectionKey.trim()); setConnected(true); setLocalStatus("接続済み。ファイルを入れると自動で精密文字起こしを開始します。"); } }
+          catch { if (!controller.signal.aborted) setLocalStatus("接続できません。補助ツールの起動・接続キー・ブラウザーのローカル接続許可を確認してください。"); }
+          finally { recognitionAbort.current = null; }
+        }}>{connected ? "接続を解除" : "端末内ツールに接続"}</button>
+        <p className="text-xs text-paper-faint">動画 → 音声WAVの作成 → 精密文字起こし。音声ファイルは抽出工程を省いて認識します。発言は短縮しません。接続キーは保存・同期しません。ブラウザーにローカル接続の許可が表示されたら許可してください。</p>
+        <p className="text-xs text-paper-faint">補助ツールの結果・抽出WAVはMacの Documents/CockpitTranscripts に保存されます。接続しない場合は録音の登録と確認済みJSONの手動取り込みを利用できます。</p>
+        {localStatus && <p role="status" className="text-sm">{localStatus}</p>}
+        {importing && connected && <button type="button" onClick={() => { stopImport.current = true; recognitionAbort.current?.abort(); }}>文字起こしを中止</button>}
+      </div>
+      <p className="mt-2 text-xs text-paper-faint">音声・動画は外部へ送信しません。文字起こし結果は案件データとして暗号化して保存・同期します。原本は別途保管してください。</p>
       {/* 取り込みゾーン */}
       <div
         className={`mt-3 rounded-sm border border-dashed px-4 py-6 text-center transition-colors ${
@@ -299,6 +334,7 @@ export function CaseRecordings() {
                   {formatDuration(r.durationSec) ? `・${formatDuration(r.durationSec)}` : ""}
                 </span>
                 <span className="text-[11px] text-paper-faint">{jpDate(r.addedAt)}</span>
+                {r.localRecognition && !r.transcriptReview && <Badge color="#B7791F">精密文字起こし・要確認</Badge>}
               </div>
 
               <div className="mt-2 grid gap-2 lg:grid-cols-[1fr_180px]">
