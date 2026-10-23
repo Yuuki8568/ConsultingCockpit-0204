@@ -10,7 +10,17 @@ type Directory = FileSystemDirectoryHandle & {
 const KEY = 'automatic-backup-v1';
 const CHUNK = 8 * 1024 * 1024;
 export const DAY = 24 * 60 * 60 * 1000;
-export interface BackupConfig { directory: Directory; enabled: boolean; last?: number; message?: string; missing?: number }
+export interface MissingOriginal { caseId: string; recordId: string; reason: string }
+export interface BackupConfig { directory: Directory; enabled: boolean; last?: number; lastComplete?: number; lastAttempt?: number; coverage?: string; message?: string; missing?: number; issues?: MissingOriginal[] }
+export const RETRY = 5 * 60 * 1000;
+export function backupWarningKey(config: BackupConfig) {
+  return JSON.stringify([config.message, config.issues?.map(i => [i.recordId, i.reason]).sort()]);
+}
+const failureReason = (error: unknown) => error instanceof DOMException && error.name === 'QuotaExceededError'
+  ? '保存先の空き容量が不足しています。容量を確保して再試行してください。'
+  : error instanceof DOMException && ['NotAllowedError', 'SecurityError'].includes(error.name)
+    ? '保存権限がありません。保存を許可して再試行してください。'
+    : '原本の読込・保存・検証に失敗しました。保存先を確認するか元ファイルを再選択してください。';
 export const getBackupConfig = () => idb.getMeta<BackupConfig>(KEY);
 async function saveConfig(config: BackupConfig) { await idb.setMeta(KEY, config); window.dispatchEvent(new Event('cockpit-backup')); }
 export function backupSupported() { return 'showDirectoryPicker' in window; }
@@ -18,10 +28,10 @@ export async function chooseBackupFolder() {
   const picker = (window as unknown as { showDirectoryPicker(o: unknown): Promise<Directory> }).showDirectoryPicker;
   const directory = await picker({ mode: 'readwrite', id: 'cockpit-backup' });
   for (const name of ['01_案件データ_暗号化', '02_録音・動画原本', '03_復元手順・検証記録']) await directory.getDirectoryHandle(name, { create: true });
-  await saveConfig({ directory, enabled: true, message: '保存先を設定しました。初回保存を実行してください。' });
+  await navigator.locks.request('cockpit-auto-backup', () => saveConfig({ directory, enabled: true, message: '保存先を設定しました。初回保存を実行してください。' }));
 }
-export async function pauseBackup() { const c = await getBackupConfig(); if (c) await saveConfig({ ...c, enabled: false }); }
-export async function permitBackup() { const c = await getBackupConfig(); if (!c) throw new Error('保存先を選択してください'); if (await c.directory.requestPermission({ mode: 'readwrite' }) !== 'granted') throw new Error('フォルダーへの保存許可が必要です'); await saveConfig({ ...c, enabled: true }); }
+export async function pauseBackup() { const c = await getBackupConfig(); if (c) await navigator.locks.request('cockpit-auto-backup', async () => { const latest = await getBackupConfig(); if (latest) await saveConfig({ ...latest, enabled: false }); }); }
+export async function permitBackup() { const c = await getBackupConfig(); if (!c) throw new Error('保存先を選択してください'); if (await c.directory.requestPermission({ mode: 'readwrite' }) !== 'granted') throw new Error('フォルダーへの保存許可が必要です'); await navigator.locks.request('cockpit-auto-backup', async () => { const latest = await getBackupConfig(); if (!latest || !await latest.directory.isSameEntry(c.directory)) throw new Error('保存先が変更されました。もう一度操作してください'); await saveConfig({ ...latest, enabled: true }); }); }
 async function hash(blob: Blob) { return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', await blob.arrayBuffer())), b => b.toString(16).padStart(2, '0')).join(''); }
 export async function writeVerified(dir: FileSystemDirectoryHandle, name: string, blob: Blob) {
   const handle = await dir.getFileHandle(name, { create: true });
@@ -39,11 +49,26 @@ export async function writeVerified(dir: FileSystemDirectoryHandle, name: string
   for (let i = 0; i < hashes.length; i++) if (await hash(saved.slice(i * CHUNK, (i + 1) * CHUNK)) !== hashes[i]) throw new Error('保存ファイルの検証に失敗しました');
   return hashes;
 }
-function mediaName(meta: RecordingMeta) { return `${encodeURIComponent(meta.id)}--${meta.name.replace(/[\\/:*?"<>|]/g, '_').slice(-120)}`; }
+export function mediaName(meta: RecordingMeta) {
+  // macOS limits a path component in UTF-8 bytes, not JavaScript characters.
+  const prefix = encodeURIComponent(meta.id);
+  if (new TextEncoder().encode(prefix).length > 80) throw new Error('録音IDが長すぎます');
+  const clean = meta.name.replace(/[\\/:*?"<>|]/g, '_');
+  const extension = clean.match(/\.[a-zA-Z0-9]{1,10}$/)?.[0] ?? '';
+  const stem = extension ? clean.slice(0, -extension.length) : clean;
+  let suffix = '';
+  for (const char of stem) {
+    if (new TextEncoder().encode(suffix + char + extension).length > 160) break;
+    suffix += char;
+  }
+  return `${prefix}--${suffix || 'original'}${extension}`;
+}
 async function originalExists(dir: FileSystemDirectoryHandle, meta: RecordingMeta) {
   try {
-    const file = await (await dir.getFileHandle(mediaName(meta))).getFile();
     const manifest = JSON.parse(await (await (await dir.getFileHandle(`${encodeURIComponent(meta.id)}.json`)).getFile()).text());
+    // Keep recognizing archives made with the previous filename algorithm.
+    if (manifest.id !== meta.id || manifest.chunkSize !== CHUNK || typeof manifest.file !== 'string' || /[\\/]/.test(manifest.file) || manifest.file === '.' || manifest.file === '..') return false;
+    const file = await (await dir.getFileHandle(manifest.file)).getFile();
     if (manifest.size !== meta.size || file.size !== meta.size || !Array.isArray(manifest.hashes) || manifest.hashes.length !== Math.ceil(file.size / CHUNK)) return false;
     for (let i = 0; i < manifest.hashes.length; i++) if (await hash(file.slice(i * CHUNK, (i + 1) * CHUNK)) !== manifest.hashes[i]) return false;
     return true;
@@ -55,55 +80,88 @@ async function saveOriginal(dir: FileSystemDirectoryHandle, meta: RecordingMeta,
   await writeVerified(dir, `${encodeURIComponent(meta.id)}.json`, new Blob([JSON.stringify({ id: meta.id, file: mediaName(meta), size: blob.size, chunkSize: CHUNK, hashes })]));
 }
 export async function archiveOriginal(meta: RecordingMeta, file: File) {
-  const config = await getBackupConfig();
-  if (!config?.enabled) return false;
-  await navigator.locks.request('cockpit-auto-backup', async () => {
-    if (await config.directory.queryPermission({ mode: 'readwrite' }) !== 'granted') throw new Error('自動バックアップ設定から保存許可を更新してください');
-    const dir = await config.directory.getDirectoryHandle('02_録音・動画原本', { create: true });
+  // Re-read config inside the lock: another tab may change/pause the destination.
+  return navigator.locks.request('cockpit-auto-backup', async () => {
+    const config = await getBackupConfig();
+    if (!config?.enabled) return false;
     try {
+      if (await config.directory.queryPermission({ mode: 'readwrite' }) !== 'granted') throw new Error('自動バックアップ設定から保存許可を更新してください');
+      const dir = await config.directory.getDirectoryHandle('02_録音・動画原本', { create: true });
       await saveOriginal(dir, meta, file);
-      await saveConfig({ ...config, last: undefined, message: '原本を保存しました。案件データの次回保存を待っています。' });
+      await saveConfig({ ...config, coverage: undefined, lastAttempt: undefined, message: '原本を保存しました。案件データの次回保存を待っています。' });
+      return true;
     } catch (error) {
-      await saveConfig({ ...config, last: undefined, message: '原本バックアップ未完了。設定から元ファイルを再選択してください。' });
+      await saveConfig({ ...config, coverage: undefined, lastAttempt: undefined, message: '原本バックアップ未完了。設定から元ファイルを再選択してください。' });
       throw error;
     }
   });
-  return true;
+}
+/** Match explicitly selected originals only; ambiguous names/sizes require manual selection. */
+export async function archiveMatchingOriginals(files: File[]) {
+  const state = vaultStore.getState();
+  if (!state) throw new Error('金庫を解錠してください');
+  const config = await getBackupConfig();
+  if (!config?.enabled) throw new Error('先に保存を許可してください');
+  const records = state.cases.flatMap(c => c.recordings ?? []);
+  let saved = 0, skipped = 0;
+  for (const file of files) {
+    const matches = records.filter(r => r.name === file.name && r.size === file.size);
+    if (matches.length !== 1) { skipped++; continue; }
+    if (!await archiveOriginal(matches[0], file)) throw new Error('自動保存が停止されています');
+    saved++;
+  }
+  await runBackup(true);
+  return { saved, skipped };
 }
 export async function runBackup(force = false) {
   return navigator.locks.request('cockpit-auto-backup', { ifAvailable: true }, async lock => {
     if (!lock) return;
     const config = await getBackupConfig();
-    if (!config?.enabled || (!force && config.last && Date.now() - config.last < DAY)) return;
-    if (!vaultStore.getState()) return;
+    if (!config?.enabled) return;
+    const current = vaultStore.getState();
+    if (!current) return;
+    const coverage = JSON.stringify(current.cases.flatMap(c => (c.recordings ?? []).map(r => [c.id, r.id, r.size, r.name])).sort());
+    // Store a digest, not plaintext recording names, in local backup preferences.
+    const coverageHash = await hash(new Blob([coverage]));
+    const dailyDue = !config.last || Date.now() - config.last >= DAY;
+    const changed = config.coverage !== coverageHash;
+    if (!force && !dailyDue && !changed && !config.missing && !config.message?.includes('未完了')) return;
+    if (!force && config.lastAttempt && Date.now() - config.lastAttempt < RETRY) return;
+    const attempt = Date.now();
     try {
       if (await config.directory.queryPermission({ mode: 'readwrite' }) !== 'granted') throw new Error('保存権限が必要です。「保存を許可して今すぐ実行」を押してください');
       await vaultStore.flushPending();
       const state = structuredClone(vaultStore.getState());
       if (!state) return;
-      const text = await buildEncryptedBackup(state);
-      // Verify decryption before accepting this generation as recoverable.
-      const restored = JSON.parse(await decryptBackup(text));
-      if (JSON.stringify(restored.state) !== JSON.stringify(state)) throw new Error('復元検証に失敗しました');
+      const writeSnapshot = force || dailyDue || changed;
+      let savedAt = config.last;
       const stamp = new Date().toISOString().replace(/[:.]/g, '-') + '-' + crypto.randomUUID().slice(0, 8);
-      const records = await config.directory.getDirectoryHandle('01_案件データ_暗号化', { create: true });
-      await writeVerified(records, `cockpit-${stamp}.json`, new Blob([text]));
+      if (writeSnapshot) {
+        const text = await buildEncryptedBackup(state);
+        // Verify decryption before accepting this generation as recoverable.
+        const restored = JSON.parse(await decryptBackup(text));
+        if (JSON.stringify(restored.state) !== JSON.stringify(state)) throw new Error('復元検証に失敗しました');
+        const records = await config.directory.getDirectoryHandle('01_案件データ_暗号化', { create: true });
+        await writeVerified(records, `cockpit-${stamp}.json`, new Blob([text]));
+        savedAt = Date.now();
+      }
       const originals = await config.directory.getDirectoryHandle('02_録音・動画原本', { create: true });
-      let missing = 0;
+      const issues: MissingOriginal[] = [];
       for (const c of state.cases) for (const r of c.recordings ?? []) {
         if (!vaultStore.getState()) throw new Error('施錠されたため原本の保存を中断しました');
         if (await originalExists(originals, r)) continue;
         try {
-          if (r.sourceOnly) { missing++; continue; }
+          if (r.sourceOnly) { issues.push({ caseId: c.id, recordId: r.id, reason: '大容量の原本はこのブラウザーに残っていません。元ファイルを再選択してください。' }); continue; }
           await saveOriginal(originals, r, await vaultStore.readMediaBlob(r.id, r.mimeType));
-        } catch { missing++; }
+        } catch (error) { issues.push({ caseId: c.id, recordId: r.id, reason: failureReason(error) }); }
       }
+      const missing = issues.length;
       const docs = await config.directory.getDirectoryHandle('03_復元手順・検証記録', { create: true });
       await writeVerified(docs, '復元手順.txt', new Blob([RESTORE]));
-      await writeVerified(docs, `${stamp}.json`, new Blob([JSON.stringify({ at: stamp, recordsVerified: true, missingOriginals: missing, cloudUploadVerified: false })]));
-      await saveConfig({ ...config, last: Date.now(), missing, message: missing ? `案件データ保存済み。原本${missing}件が未保存です（全体バックアップ未完了）。` : '案件データ・登録済み原本の保存と読戻し検証が完了しました。Driveの同期完了は別途確認してください。' });
+      await writeVerified(docs, `${stamp}.json`, new Blob([JSON.stringify({ at: stamp, recordsVerified: true, recordsSavedAt: savedAt, missingOriginals: missing, issues, cloudUploadVerified: false })]));
+      await saveConfig({ ...config, last: savedAt, lastComplete: missing ? config.lastComplete : Date.now(), lastAttempt: attempt, coverage: coverageHash, missing, issues, message: missing ? `案件データ保存済み。原本${missing}件が未保存です（全体バックアップ未完了）。` : '案件データ・登録済み原本の保存と読戻し検証が完了しました。Driveの同期完了は別途確認してください。' });
     } catch (error) {
-      await saveConfig({ ...config, message: `バックアップ未完了：${error instanceof Error ? error.message : String(error)}` });
+      await saveConfig({ ...config, lastAttempt: attempt, message: `バックアップ未完了：${error instanceof Error ? error.message : String(error)}` });
     }
   });
 }

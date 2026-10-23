@@ -144,11 +144,14 @@ export function CaseRecordings() {
           await deleteMediaBlob(id).catch(() => {});
           break;
         }
+        // Large originals have no durable browser copy: don't register them as
+        // imported until the configured archive has been written and verified.
+        if (sourceOnly) await archiveOriginal(meta, f);
         await patch((x) => {
           x.recordings = x.recordings ?? [];
           x.recordings.push(meta);
         });
-        try { await archiveOriginal(meta, f); }
+        try { if (!sourceOnly) await archiveOriginal(meta, f); }
         catch (error) { setImportError(`録音は登録済みですが原本バックアップ未完了：${error instanceof Error ? error.message : String(error)}。設定から原本を再選択してください。`); }
         if (connected) {
           // The media is already registered. A recognition failure must not delete its stored blob.
