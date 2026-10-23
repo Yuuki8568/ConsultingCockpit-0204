@@ -33,6 +33,7 @@ jobs:
         env:
           WRANGLER_SEND_METRICS: 'false'
       - run: node packages/web/node_modules/@playwright/test/cli.js install --with-deps chromium
+      - run: bun run test:automatic-backup
       - run: bun run test:contract-ui
       - run: bun run test:blackbox
       - uses: actions/upload-artifact@v4

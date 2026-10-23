@@ -34,6 +34,7 @@ jobs:
           VITE_RUNABLE_AUTH_ISSUER: ${{ vars.VITE_RUNABLE_AUTH_ISSUER }}
           VITE_WEBSITE_URL: ${{ vars.VITE_WEBSITE_URL }}
       - run: node packages/web/node_modules/@playwright/test/cli.js install --with-deps chromium
+      - run: bun run test:automatic-backup
       - run: bun run test:contract-ui
       - run: bun run test:blackbox
       - name: Package exact tested commit
