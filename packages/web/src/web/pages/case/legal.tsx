@@ -1,3 +1,5 @@
+import { recheckDocumentRelease } from '../../domain/logic/docs';
+import { unresolvedContractMarkers } from '../../domain/logic/contract-placeholders';
 /** ⑨契約・法務チェック — 書類の状態管理・チェックリスト・書類生成・9書類まとめ出力 */
 import { useMemo } from "react";
 import { useCurrentCase } from "../../hooks/use-current";
@@ -11,11 +13,11 @@ import {
   Panel,
   Sec,
 } from "../../components/kit";
-import { APPROVED_TERMS_VERSION, APPROVED_TERMS_TEMPLATES } from "../../domain/data/approved-terms";
+import { APPROVED_TERMS_VERSION, isApprovedVersion, templatesForVersion } from "../../domain/data/contract-revisions";
 import { ContractActionPanel } from "../../components/contract-action-panel";
 import { ContractFactsPanel } from "../../components/contract-facts-panel";
 import { missingContractFacts } from "../../domain/logic/contract-facts";
-import { selectNewContractVersion } from "../../domain/logic/contract-version";
+import { contractGenerationBlock, selectNewContractVersion } from "../../domain/logic/contract-version";
 import { DOC_TYPE_DEFS } from "../../domain/data/doc-templates";
 import { LEGAL_CHECKLIST_ITEMS } from "../../domain/data/diagnosis-legal";
 import { fillTemplate, gatherTemplateContext, generateDocNo, contextWithDocNo, savedDocumentsForExport, isSignedDocument, referencedDocument, changeDocumentStatus, changeDocumentSignedAt, documentReleaseBlock } from "../../domain/logic/docs";
@@ -117,6 +119,8 @@ export function CaseLegal() {
   };
 
   const generate = async (docType: string) => {
+    const versionBlock=contractGenerationBlock(c);
+    if(versionBlock) { window.alert(versionBlock); return; }
     const referenced = referencedDocument(c, docType);
     if (c.legalDocs[statusKey(docType)]?.status === "signed" || (referenced && isSignedDocument(c, referenced))) {
       window.alert("締結済みの書類は再生成しません。変更契約は別途確認してください。");
@@ -124,8 +128,8 @@ export function CaseLegal() {
     }
     trace("generate_begin", { docType });
     try {
-      const newVersion = c.contractTemplateVersion === APPROVED_TERMS_VERSION;
-      const tpl = newVersion ? (APPROVED_TERMS_TEMPLATES as Record<string, string>)[docType] : state.docTemplates[docType];
+      const newVersion = isApprovedVersion(c.contractTemplateVersion);
+      const tpl = newVersion ? (templatesForVersion(c.contractTemplateVersion) as Record<string, string>)[docType] : state.docTemplates[docType];
 
       const templateVersion = c.contractTemplateVersion;
       if (!tpl) {
@@ -137,8 +141,8 @@ export function CaseLegal() {
       }
       const docNo = generateDocNo(docType, state);
       const filled = fillTemplate(tpl, contextWithDocNo(ctx, docType, docNo));
-      const pending = newVersion ? [...missingContractFacts(c, docType), ...filled.missing] : [];
-      const releaseBlocked = pending.length ? `案件の未確認・未入力が残っています：${[...new Set(pending)].join("、")}。確認後に再生成してください。` : undefined;
+      const pending = newVersion ? [...missingContractFacts(c, docType), ...filled.missing, ...unresolvedContractMarkers(filled.text)] : [];
+      const releaseBlocked = pending.length ? `案件の未確認・未入力が残っています：${[...new Set(pending)].join("、")}。確認後に再生成、または保存本文を修正し「本文・条件を再確認」を実行してください。` : undefined;
       const id = "D" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
       await patch((x) => {
         const active = referencedDocument(x, docType);
@@ -153,6 +157,7 @@ export function CaseLegal() {
           content: filled.text,
           status: "draft",
           releaseBlocked,
+          releaseBlockKind: releaseBlocked && templateVersion===APPROVED_TERMS_VERSION ? "case_facts_review" : undefined,
           templateVersion,
         });
         const sk = statusKey(docType);
@@ -226,16 +231,16 @@ export function CaseLegal() {
         {c.contractTemplateVersion ? <Note tone="warn">選択中: {c.contractTemplateVersion}。署名済み本文は新しい版へ置換しません。</Note> : <>
           <p className="mb-2 text-sm">現在は保存済みの旧版雛形です。新しい契約へ旧条件をそのまま流用しないでください。</p>
           <button className="btn btn-primary btn-sm" onClick={() => {
-            if (!window.confirm("事業目的のB2B取引で、既存合意のない新規案件として、2026-10-23承認版を選択しますか？保存済み雛形は変更せず、案件条件・情報管理票の確認が揃うまで正式出力を停止します。")) return;
+            if (!window.confirm("事業目的のB2B取引で、既存合意のない新規案件として、2026-10-24承認改訂版を選択しますか？保存済み雛形は変更せず、案件条件・情報管理票の確認が揃うまで正式出力を停止します。")) return;
             void patch((x) => { const error = selectNewContractVersion(x); if (error) window.alert(error); });
-          }}>新規B2B案件に2026-10-23承認版を選択</button>
+          }}>新規B2B案件に2026-10-24承認改訂版を選択</button>
         </>}
       </Panel>
       <ContractActionPanel c={c} missingFacts={missingContractFacts(c)} evidence={c.contractActionEvidence} onEvidenceChange={(evidence) => { void patch((x) => { x.contractActionEvidence = evidence; }); }} onNavigate={(target) => {
         if (target === "conditions") { const el = document.getElementById("contract-conditions"); el?.focus(); el?.scrollIntoView({ block: "start", behavior: "smooth" }); }
         else void mutate((s) => { s.currentTab = target === "payment" ? "pricing" : "support"; }, ["meta:app"]);
       }} />
-      {c.contractTemplateVersion === APPROVED_TERMS_VERSION && <ContractFactsPanel c={c} onChange={(facts) => { void patch((x) => { x.contractFacts = facts; }); }} />}
+      {isApprovedVersion(c.contractTemplateVersion) && <ContractFactsPanel c={c} onChange={(facts) => { void patch((x) => { x.contractFacts = facts; }); }} />}
       <ContractTestExport c={c} state={state} sourceVersion={__APP_SOURCE_VERSION__} />
       <Panel
         title="書類の状態"
@@ -264,7 +269,7 @@ export function CaseLegal() {
                 const d = c.legalDocs[sk] ?? { status: "todo", signedAt: "", docNo: "" };
                 const g = referencedDocument(c, key);
                 const locked = d.status === "signed" || Boolean(g && isSignedDocument(c, g));
-                const missing = g ? (g.content.match(/\[要入力:[^\]]+\]/g) ?? []).length : fillTemplate((c.contractTemplateVersion === APPROVED_TERMS_VERSION ? APPROVED_TERMS_TEMPLATES[key] : state.docTemplates[key]) ?? "", ctx).missing.length;
+                const missing = g ? unresolvedContractMarkers(g.content).length : fillTemplate((isApprovedVersion(c.contractTemplateVersion) ? templatesForVersion(c.contractTemplateVersion)![key] : state.docTemplates[key]) ?? "", ctx).missing.length;
                 return (
                   <tr key={key}>
                     <td>
@@ -312,6 +317,10 @@ export function CaseLegal() {
                         <button className="btn btn-sm" onClick={() => generate(key)}>
                           作る
                         </button>
+                        {g?.releaseBlockKind === 'case_facts_review' && !locked && <button className="btn btn-sm" onClick={() => {
+                          if (!window.confirm('案件条件と保存本文の実際の記載・合意を確認しましたか？未入力の検出を再確認します。法的適合性・契約成立の自動認定ではありません。編集画面は閉じてから操作してください。')) return;
+                          void patch(x=>{const error=recheckDocumentRelease(x,g.id);if(error) window.alert(error);});
+                        }}>本文・条件を再確認</button>}
                         {g && (
                           <button className="btn btn-sm" onClick={() => openViewer(g)}>
                             見る

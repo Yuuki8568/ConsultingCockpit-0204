@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Panel } from './kit';
-import { APPROVED_TERMS_VERSION } from '../domain/data/approved-terms';
+import { APPROVED_TERMS_VERSION } from '../domain/data/contract-revisions';
 import { buildContractTestBundle } from '../lib/export/contract-test';
 import { downloadZip } from '../lib/export/zip';
 import type { CaseRecord, VaultState } from '../domain/types';

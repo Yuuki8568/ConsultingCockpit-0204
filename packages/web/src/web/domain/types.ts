@@ -561,6 +561,7 @@ export interface GeneratedDoc {
   /** 新規生成時に固定。未承認版は本文編集で解除しない。 */
   templateVersion?: string;
   releaseBlocked?: string;
+  releaseBlockKind?: "case_facts_review";
   id: string;
   docType: string;
   docNo: string;
@@ -583,6 +584,15 @@ export interface Maturity {
 }
 
 export interface ContractFacts {
+  ndaCapBasis?: "" | "main_contract" | "standalone";
+  originalContractId?: string;
+  originalContractVersion?: string;
+  originalContractSignedOn?: string;
+  dpaImplementationEvidence?: string;
+  actualAcceptanceOn?: string;
+  completionSettlement?: string;
+  completionAiEvidence?: string;
+  completionEvidence?: string;
   orderReceivedOn?: string;
   transactionPurpose?: "" | "business" | "consumer";
   legalApplicability?: string;

@@ -1,6 +1,7 @@
+import { unresolvedContractMarkers } from '../../domain/logic/contract-placeholders';
 /** Read-only template inspection. Never issues documents or updates a case/vault. */
 import type { CaseRecord, VaultState } from '../../domain/types';
-import { APPROVED_TERMS_TEMPLATES, APPROVED_TERMS_VERSION } from '../../domain/data/approved-terms';
+import { templatesForVersion, APPROVED_TERMS_VERSION } from '../../domain/data/contract-revisions';
 import { DOC_TYPE_DEFS } from '../../domain/data/doc-templates';
 import { fillTemplate, gatherTemplateContext } from '../../domain/logic/docs';
 import { missingContractFacts } from '../../domain/logic/contract-facts';
@@ -15,7 +16,7 @@ export function buildContractTestBundle(c: CaseRecord, state: VaultState, source
   if (testVersion === 'latest') c = { ...c, contractTemplateVersion: APPROVED_TERMS_VERSION };
   const stamp = now.toISOString().replace(/[:.]/g, '-');
   const version = c.contractTemplateVersion || '未選択（保存雛形・旧版の可能性あり）';
-  const templates = c.contractTemplateVersion === APPROVED_TERMS_VERSION ? APPROVED_TERMS_TEMPLATES : state.docTemplates;
+  const templates = templatesForVersion(c.contractTemplateVersion) ?? state.docTemplates;
   const ctx = gatherTemplateContext(c, state);
   // Existing formal renderer has a representative-title default; test output must not invent it.
   ctx['甲代表者肩書'] = c.settings?.kakuyaku?.representativeTitle || '';
@@ -28,7 +29,7 @@ export function buildContractTestBundle(c: CaseRecord, state: VaultState, source
     const template = templates[key];
     if (!template?.trim()) throw new Error(`${title}の雛形がありません。別の版への自動置換は行いません。`);
     const filled = fillTemplate(template, ctx);
-    const markers = filled.text.match(/\[要入力:[^\]]+\]|［要確認[^］]*］|\{\{[^}]+\}\}|[^\n]*○[^\n]*/g) ?? [];
+    const markers = unresolvedContractMarkers(filled.text);
     const missing = [...new Set([...filled.missing, ...missingContractFacts(c, key), ...markers])];
     report.push(`\n【${title}】\n${missing.map(v => `・${v}`).join('\n') || '検出なし（確認済みを意味しません）'}`);
     return {name: `TEST_${stamp}_${String(i+1).padStart(2,'0')}_${title}.doc`, content: buildWordHtml({title:`${TEST_NOTICE} — ${title}`, meta, body:filled.text, footer:TEST_NOTICE, fileName:''})};

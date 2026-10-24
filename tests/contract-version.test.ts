@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { selectNewContractVersion, PENDING_CONTRACT_RELEASE } from '../packages/web/src/web/domain/logic/contract-version';
-import { APPROVED_TERMS_VERSION } from '../packages/web/src/web/domain/data/approved-terms';
+import { APPROVED_TERMS_VERSION } from '../packages/web/src/web/domain/data/contract-revisions';
 import { changeDocumentStatus, savedDocumentsForExport } from '../packages/web/src/web/domain/logic/docs';
 import type { CaseRecord } from '../packages/web/src/web/domain/types';
 const fresh = () => ({generatedDocs:[],legalDocs:{}} as unknown as CaseRecord);
@@ -43,7 +43,7 @@ test('existing support, agreed pricing or contract dates block adoption without 
 
 test('normalization preserves version, review gate, signed body and fee basis without adopting old cases',async()=>{
  const {makeEmptyCase,normalizeCase}=await import('../packages/web/src/web/domain/logic/state');
- const newlyCreated=makeEmptyCase('SYNTHETIC');assert.equal(newlyCreated.contractTemplateVersion,APPROVED_TERMS_VERSION);
+ const newlyCreated=makeEmptyCase('SYNTHETIC');assert.equal(newlyCreated.contractTemplateVersion,undefined);
  const old=makeEmptyCase('SYNTHETIC');delete old.contractTemplateVersion; normalizeCase(old);assert.equal(old.contractTemplateVersion,undefined);
  const c=makeEmptyCase('SYNTHETIC');assert.equal(selectNewContractVersion(c),null);
  c.generatedDocs=[{id:'saved',docType:'mainContract',docNo:'CT-1',issuedAt:'2026-10-23',content:'  unchanged body\n ',status:'signed',releaseBlocked:PENDING_CONTRACT_RELEASE,templateVersion:APPROVED_TERMS_VERSION}];

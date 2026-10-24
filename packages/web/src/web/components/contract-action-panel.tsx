@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import type { CaseRecord } from '../domain/types';
-import { APPROVED_TERMS_VERSION } from '../domain/data/approved-terms';
+import { isApprovedVersion } from '../domain/data/contract-revisions';
 import { claimContractActionPopup, contractActions, contractActionPopupEligible, contractTodayJst, type ContractActionEvidence, type ContractActionTarget } from '../domain/logic/contract-actions';
 
 const seenThisSession = new Set<string>();
@@ -66,7 +66,7 @@ export function ContractActionPanel({ c, missingFacts, evidence = {}, onEvidence
     <p className="text-sm">確認を促す案内です。表示・閉じる操作では対応済みにしません。送付・請求・送金・削除は自動実行しません。</p>
     {actions.length ? showActions(actions) : <p>現在の記録に基づく確認項目はありません。契約完了を保証するものではありません。</p>}
     {urgent.length > 0 && <button className="btn btn-outline" type="button" onClick={() => setOpen(true)}>要対応 {urgent.length} 件をまとめて表示</button>}
-    {c.contractTemplateVersion === APPROVED_TERMS_VERSION && <details ref={evidenceSection} className="rounded border p-3">
+    {isApprovedVersion(c.contractTemplateVersion) && <details ref={evidenceSection} className="rounded border p-3">
       <summary className="cursor-pointer font-semibold">確認済みの対応日付を記録</summary>
       <p className="my-2 text-sm">対象になる場合だけ有効にし、証拠を確認した実日付を入力してください。予定・推測を実績として入力しないでください。完了日の記録は手動確認です（契約本文・締結状態は変更しません）。</p>
       <div className="space-y-4">

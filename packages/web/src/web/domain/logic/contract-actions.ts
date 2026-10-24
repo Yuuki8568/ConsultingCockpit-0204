@@ -1,5 +1,5 @@
 import type { CaseRecord } from '../types';
-import { APPROVED_TERMS_VERSION } from '../data/approved-terms';
+import { isApprovedVersion } from '../data/contract-revisions';
 import { monthlyRenewalDates } from './renewal';
 
 /** Only manually verified facts; no status is inferred from viewing a reminder. */
@@ -46,7 +46,7 @@ export function claimContractActionPopup(caseId: string, actions: readonly Contr
 /** Read-only calculation. Never migrates contracts, issues invoices or completes tasks. */
 export function contractActions(c: CaseRecord, missingFacts: readonly string[], evidence: ContractActionEvidence = {}, today = contractTodayJst()): ContractAction[] {
   if (!verifiedCalendarDate(today)) throw new Error('日本時間の有効な基準日が必要です');
-  if (c.contractTemplateVersion !== APPROVED_TERMS_VERSION) return [{ id: 'legacy', title: '保存済みの契約条件を確認', detail: 'この案件には新版の期限を当てはめません。締結済みの条件・期限を個別に確認してください。', target: 'conditions', urgency: 'info' }];
+  if (!isApprovedVersion(c.contractTemplateVersion)) return [{ id: 'legacy', title: '保存済みの契約条件を確認', detail: 'この案件には新版の期限を当てはめません。締結済みの条件・期限を個別に確認してください。', target: 'conditions', urgency: 'info' }];
   const actions: ContractAction[] = [];
   const addDue = (id: string, title: string, detail: string, target: ContractActionTarget, date: string) => {
     const urgency = date < today ? 'overdue' : date <= shift(today, 3) ? 'due' : 'upcoming';

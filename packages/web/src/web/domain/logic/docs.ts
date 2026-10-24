@@ -1,5 +1,6 @@
 // 元アプリ v3 の書類採番・差し込み・雛形展開ロジックを移植（差し込みキーは一字一句同一）
-import { APPROVED_TERMS_VERSION } from "../data/approved-terms";
+import { isApprovedVersion, APPROVED_TERMS_VERSION } from "../data/contract-revisions";
+import { unresolvedContractMarkers } from './contract-placeholders';
 import { contractFactsContext, missingContractFacts } from "./contract-facts";
 import { grossTaxBreakdown } from "./tax";
 import { DOC_TYPE_DEFS } from "../data/doc-templates";
@@ -89,6 +90,7 @@ export function gatherTemplateContext(c: CaseRecord, state: VaultState): Record<
   const menuItem = menuId ? SERVICE_MENU_ITEMS.find((m) => m.id === menuId) : null;
   ctx['支援内容'] = menuItem ? buildServiceSummaryText(menuItem) : '（④単価設計で支援メニューを選ぶと、ここに「何を・どれくらい・お渡しするもの・含まないもの」が自動で入ります）';
   if (c.contractTemplateVersion) ctx['支援内容'] = c.contractFacts?.scopeAndDeliverables ?? '';
+  if (c.contractTemplateVersion === APPROVED_TERMS_VERSION) { ctx['甲代表者肩書']=k.representativeTitle||''; ctx['検収基準']=c.contractFacts?.acceptanceAndCompletion??''; }
   return { ...ctx, ...contractFactsContext(c) };
 }
 
@@ -180,9 +182,9 @@ export function changeDocumentStatus(c: CaseRecord, docType: string, status: Doc
   const saved = referencedDocument(c, docType);
   if (entry?.status === "signed" || (saved && isSignedDocument(c, saved))) return "締結済みの状態は変更できません。";
   if ((status === "signed" || status === "sent") && saved?.releaseBlocked) return saved.releaseBlocked;
-  if ((status === "signed" || status === "sent") && c.contractTemplateVersion === APPROVED_TERMS_VERSION) {
-    if (!saved || saved.templateVersion !== APPROVED_TERMS_VERSION || !saved.content?.trim()) return "承認版の保存済み本文を確認してから送付・締結を記録してください。";
-    if (missingContractFacts(c, docType).length || /\[要入力:[^\]]+\]/.test(saved.content)) return "案件の未確認・未入力を解消し、保存済み本文を確認してください。";
+  if ((status === "signed" || status === "sent") && isApprovedVersion(c.contractTemplateVersion)) {
+    if (!saved || saved.templateVersion !== c.contractTemplateVersion || !saved.content?.trim()) return "承認版の保存済み本文を確認してから送付・締結を記録してください。";
+    if (missingContractFacts(c, docType).length || unresolvedContractMarkers(saved.content).length > 0) return "案件の未確認・未入力を解消し、保存済み本文を確認してください。";
   }
   const date = entry?.signedAt ?? "";
   const validDate = /^\d{4}-\d{2}-\d{2}$/.test(date) && Number.isFinite(Date.parse(date)) && new Date(date).toISOString().slice(0, 10) === date;
@@ -207,8 +209,20 @@ export function changeDocumentSignedAt(c: CaseRecord, docType: string, signedAt:
 /** 保存時の制限は消さず、未締結の新版は現在の未確認事実も出力前に確認する。 */
 export function documentReleaseBlock(c: CaseRecord, doc: CaseRecord['generatedDocs'][number]): string | undefined {
   if (doc.releaseBlocked) return doc.releaseBlocked;
-  if (doc.templateVersion === APPROVED_TERMS_VERSION && !isSignedDocument(c, doc)) {
-    if (missingContractFacts(c, doc.docType).length || /\[要入力:[^\]]+\]/.test(doc.content)) return '案件の未確認・未入力を解消してから正式出力してください。';
+  if (isApprovedVersion(doc.templateVersion) && !isSignedDocument(c, doc)) {
+    if (missingContractFacts(c, doc.docType).length || unresolvedContractMarkers(doc.content).length > 0) return '案件の未確認・未入力を解消してから正式出力してください。';
   }
   return undefined;
+}
+
+/** Explicit re-review only for this revision's case-fact gate, never an old approval/legal hold. */
+export function recheckDocumentRelease(c: CaseRecord, docId: string): string | null {
+ const doc=c.generatedDocs.find(d=>d.id===docId);
+ if (!doc || isSignedDocument(c,doc)) return '締結済み・存在しない書類は再確認で変更できません。';
+ if(doc.templateVersion!==APPROVED_TERMS_VERSION||c.contractTemplateVersion!==doc.templateVersion||doc.releaseBlockKind!=='case_facts_review') return 'この書類の保存された制限は自動解除の対象外です。';
+ const missing=[...missingContractFacts(c,doc.docType),...unresolvedContractMarkers(doc.content)];
+ if(!doc.content?.trim()||missing.length) return '案件条件・保存本文の未確認を解消してください：'+missing.join('、');
+ delete doc.releaseBlocked;
+ delete doc.releaseBlockKind;
+ return null;
 }

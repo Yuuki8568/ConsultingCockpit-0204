@@ -1,3 +1,4 @@
+import { unresolvedContractMarkers } from '../domain/logic/contract-placeholders';
 /**
  * 書類の表示・編集モーダル。
  *
@@ -23,7 +24,7 @@ export function DocViewerModal() {
   // 万が一内容が残っていた場合でも、施錠中は表示・コピー・書き出しを行わない。
   if (!vaultStore.isUnlocked()) return null;
   const content = docViewer.getContent();
-  const missing = content.match(/\[要入力:[^\]]+\]/g) ?? [];
+  const missing = doc.readOnly ? [] : unresolvedContractMarkers(content);
 
   return (
     <Modal
@@ -33,12 +34,12 @@ export function DocViewerModal() {
       wide
       footer={
         <>
-          {!doc.releaseBlocked && <CopyButton text={content} label="本文をコピー" />}
+          {missing.length === 0 && !doc.releaseBlocked && <CopyButton text={content} label="本文をコピー" />}
           <button
             className="btn btn-primary btn-sm"
-            disabled={Boolean(doc.releaseBlocked)}
+            disabled={Boolean(doc.releaseBlocked) || missing.length > 0}
             onClick={() =>
-              !doc.releaseBlocked && downloadWord({
+              missing.length === 0 && !doc.releaseBlocked && downloadWord({
                 title: doc.title,
                 docNo: doc.docNo,
                 body: content,
@@ -52,10 +53,10 @@ export function DocViewerModal() {
       }
     >
       <div className="space-y-3">
-        {doc.releaseBlocked && <Note tone="warn">{doc.releaseBlocked} この書類は現時点では画面内レビュー専用です。本文編集だけでは解除されません。</Note>}
+        {doc.releaseBlocked && <Note tone="warn">{doc.releaseBlocked} この書類は現時点では画面内レビュー専用です。本文編集だけでは解除されません。新版の案件事実による制限は、画面を閉じて「本文・条件を再確認」で確認できます。</Note>}
         {missing.length > 0 && (
           <Note tone="warn">
-            空欄が {missing.length} か所あります（［要入力:…］と表示されている部分）。
+            未入力・未確認の仮欄が {missing.length} か所あります（要入力欄、○日・○回、［要確認…］など）。
             ①案件設定と設定画面の受託者プロフィールを埋めると自動で入ります。
           </Note>
         )}
