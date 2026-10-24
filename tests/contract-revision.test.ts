@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {execFileSync} from 'node:child_process';
+import {createHash} from 'node:crypto';
+import {readFileSync} from 'node:fs';
 import {APPROVED_TERMS_VERSION as V, APPROVED_TERMS_TEMPLATES as T, PREVIOUS_VERSION, PREVIOUS_TEMPLATES,templatesForVersion} from '../packages/web/src/web/domain/data/contract-revisions';
 import {missingContractFacts,contractFactsContext} from '../packages/web/src/web/domain/logic/contract-facts';
 import {unresolvedContractMarkers} from '../packages/web/src/web/domain/logic/contract-placeholders';
@@ -12,7 +13,8 @@ import type {CaseRecord,VaultState} from '../packages/web/src/web/domain/types';
 const fixture=()=>{const c=makeEmptyCase('SYNTHETIC');c.contractTemplateVersion=V;c.contractFacts={transactionPurpose:'business',legalApplicability:'合成適用確認',documentVersions:'合成ID版',noticeDestination:'test@example.invalid',noticeMethod:'合成到達方式',informationManagement:'合成管理票',retentionDeletion:'合成削除条件',aiUse:'none',ndaCapBasis:'standalone'};return c;};
 test('previous approved source frozen byte-for-byte at deployed parent; registry selects old separately',()=>{
  const path='packages/web/src/web/domain/data/approved-terms.ts';
- assert.deepEqual(execFileSync('git',['show','25fc70d:'+path]),require('node:fs').readFileSync(path));
+ // SHA256 of the deployed 25fc70d source, independent of shallow CI history.
+ assert.equal(createHash('sha256').update(readFileSync(path)).digest('hex'),'a8e77f5a60d37e5ce6c1d81d78e08977b87e82b199be03c267f0275bd5003ede');
  assert.equal(templatesForVersion(PREVIOUS_VERSION),PREVIOUS_TEMPLATES);assert.equal(templatesForVersion(V),T);
  assert.ok(PREVIOUS_TEMPLATES.deliveryReceipt.includes('納品日から14日以内に本検収書'));assert.ok(!T.deliveryReceipt.includes('納品日から14日以内に本検収書'));
 });
