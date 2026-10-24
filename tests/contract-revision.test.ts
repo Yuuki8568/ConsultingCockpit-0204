@@ -1,3 +1,4 @@
+import { APPROVED_TERMS_VERSION as LATEST } from '../packages/web/src/web/domain/data/contract-latest';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
@@ -56,7 +57,7 @@ test('saved unsigned NDA is blocked even if old release flag absent, sent/sign g
  doc.content='［要確認：合意］';assert.ok(documentReleaseBlock(c,doc));
 });
 test('new cases explicitly choose revision; old/signed/generated versions cannot be changed',()=>{
- const n=makeEmptyCase('SYNTHETIC');assert.equal(n.contractTemplateVersion,undefined);assert.ok(contractGenerationBlock(n));assert.equal(selectNewContractVersion(n),null);assert.equal(contractGenerationBlock(n),null);assert.equal(n.contractTemplateVersion,V);
+ const n=makeEmptyCase('SYNTHETIC');assert.equal(n.contractTemplateVersion,undefined);assert.ok(contractGenerationBlock(n));assert.equal(selectNewContractVersion(n),null);assert.equal(contractGenerationBlock(n),null);assert.equal(n.contractTemplateVersion,LATEST);
  const c=fixture();c.contractTemplateVersion=PREVIOUS_VERSION;const original=JSON.stringify(c);assert.ok(selectNewContractVersion(c));assert.equal(JSON.stringify(c),original);
  c.generatedDocs=[{id:'signed',docType:'nda',docNo:'NDA-OLD',issuedAt:'2026-10-23',templateVersion:PREVIOUS_VERSION,status:'signed',content:'SIGNED ORIGINAL ○ ［残した文言］'}];c.legalDocs.NDA={status:'signed',docNo:'NDA-OLD',signedAt:'2026-10-23'};
  const signed=JSON.stringify(c.generatedDocs);normalizeCase(c);assert.equal(JSON.stringify(c.generatedDocs),signed);assert.equal(documentReleaseBlock(c,c.generatedDocs[0]),undefined);
@@ -64,7 +65,7 @@ test('new cases explicitly choose revision; old/signed/generated versions cannot
 test('TEST latest nine documents never mutate old/signed cases or claim implementation',()=>{
  const c=fixture();c.contractTemplateVersion=PREVIOUS_VERSION;c.legalDocs.NDA={status:'signed',docNo:'NDA-OLD',signedAt:'2026-10-23'};
  const state={profile:{},cases:[c],docTemplates:{}} as VaultState;const before=JSON.stringify(state);const b=buildContractTestBundle(c,state,'SYNTHETIC-SOURCE',new Date('2026-10-24T02:00Z'),'latest');
- assert.equal(b.entries.filter(x=>x.name.endsWith('.doc')).length,9);assert.equal(JSON.stringify(state),before);assert.ok(String(b.entries[0].content).includes(V));
+ assert.equal(b.entries.filter(x=>x.name.endsWith('.doc')).length,9);assert.equal(JSON.stringify(state),before);assert.ok(String(b.entries[0].content).includes(LATEST));
  const dpa=String(b.entries.find(x=>x.name.includes('DPA'))!.content);assert.ok(dpa.includes('要入力:原契約締結日'));assert.ok(dpa.includes('実施証明ではない'));
  const rpt=String(b.entries.find(x=>x.name.includes('業務完了'))!.content);assert.ok(rpt.includes('要入力:完了精算確認'));assert.ok(rpt.includes('要入力:完了AI確認'));assert.ok(!rpt.includes('（案件条件票の料金明細）円'));
 });

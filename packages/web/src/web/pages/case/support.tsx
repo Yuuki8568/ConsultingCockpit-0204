@@ -1,3 +1,4 @@
+import { serviceScopeBlock, supportScopeMutationBlock } from '../../domain/logic/service-scope';
 /** ⑧継続サポート — 月額契約・面談記録・範囲・自走ロードマップ・紹介依頼 */
 import { useCurrentCase } from "../../hooks/use-current";
 import { useVault } from "../../hooks/use-vault";
@@ -51,7 +52,7 @@ const SCOPE_PRESETS = {
     "システムの開発・保守",
     "AIサービスの利用料の負担",
     "個人情報を含むデータの直接処理",
-    "補助金申請書類の作成代行（行政書士の業務範囲）",
+    "補助金・助成金の申請書類/申請用事業計画書の作成代行・代筆・提出代理（当事務所の受託対象外）",
     "24時間の障害対応",
   ],
 };
@@ -121,8 +122,11 @@ export function CaseSupport() {
   const sp = c.support;
   const setSp = (fn: (s: Support) => void) =>
     void patch((x) => {
-      if (!x.support) x.support = emptySupport(Boolean(c.contractTemplateVersion));
-      fn(x.support);
+      const draft=structuredClone(x.support ?? emptySupport(Boolean(c.contractTemplateVersion)));
+      fn(draft);
+      const block=supportScopeMutationBlock(x,x.support,draft);
+      if(block) {window.alert(block);return;}
+      x.support=draft;
     });
 
   if (!sp) {
@@ -164,6 +168,7 @@ export function CaseSupport() {
 
   return (
     <div className="space-y-4">
+      {serviceScopeBlock(c) && <Note tone="warn">{serviceScopeBlock(c)} 新たな着手・受託拡大の操作を停止します。過去記録は保持し、既存契約の義務を一方的に解除するものではありません。必要な対応は確認してください。</Note>}
       <Panel title="月額契約" note={c.contractTemplateVersion ? "新規版：1ヶ月単位・開始日の応当日更新。更新停止は前日23:59（日本時間）まで。入金確認後、合意・通知した開始日から有料業務を始めます。" : "既存契約の保存内容を表示しています。期間や更新条件は締結済みの合意をご確認ください。"}>
         <Grid cols={3}>
           <NumField

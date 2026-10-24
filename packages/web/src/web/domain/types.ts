@@ -584,6 +584,9 @@ export interface Maturity {
 }
 
 export interface ContractFacts {
+  serviceRequestSummary?: string;
+  serviceScopeClassification?: "" | "business_improvement" | "general_information" | "application_preparation" | "application_submission" | "needs_review";
+  serviceScopeReviewEvidence?: string;
   ndaCapBasis?: "" | "main_contract" | "standalone";
   originalContractId?: string;
   originalContractVersion?: string;

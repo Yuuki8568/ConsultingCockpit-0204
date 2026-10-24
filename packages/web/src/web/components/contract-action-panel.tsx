@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import type { CaseRecord } from '../domain/types';
-import { isApprovedVersion } from '../domain/data/contract-revisions';
+import { isApprovedVersion } from '../domain/data/contract-latest';
 import { claimContractActionPopup, contractActions, contractActionPopupEligible, contractTodayJst, type ContractActionEvidence, type ContractActionTarget } from '../domain/logic/contract-actions';
 
 const seenThisSession = new Set<string>();

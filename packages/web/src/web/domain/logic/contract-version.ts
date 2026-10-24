@@ -1,5 +1,5 @@
 import type { CaseRecord } from '../types';
-import { isApprovedVersion, APPROVED_TERMS_VERSION } from '../data/contract-revisions';
+import { isApprovedVersion, APPROVED_TERMS_VERSION } from '../data/contract-latest';
 
 /** 新規案件にのみ明示採用。既存・送付済み・締結済み・生成済み案件は移行しない。 */
 export function selectNewContractVersion(c: CaseRecord): string | null {

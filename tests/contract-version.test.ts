@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { selectNewContractVersion, PENDING_CONTRACT_RELEASE } from '../packages/web/src/web/domain/logic/contract-version';
-import { APPROVED_TERMS_VERSION } from '../packages/web/src/web/domain/data/contract-revisions';
+import { APPROVED_TERMS_VERSION } from '../packages/web/src/web/domain/data/contract-latest';
 import { changeDocumentStatus, savedDocumentsForExport } from '../packages/web/src/web/domain/logic/docs';
 import type { CaseRecord } from '../packages/web/src/web/domain/types';
 const fresh = () => ({generatedDocs:[],legalDocs:{}} as unknown as CaseRecord);

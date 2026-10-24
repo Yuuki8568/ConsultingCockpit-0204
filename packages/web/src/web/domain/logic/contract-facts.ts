@@ -1,6 +1,9 @@
+import { serviceScopeBlock, SERVICE_SCOPE_LABELS } from './service-scope';
 import type { CaseRecord, ContractFacts } from '../types';
-import { APPROVED_TERMS_VERSION } from '../data/contract-revisions';
+import { hasRevisedContractFacts } from '../data/contract-latest';
 export const CONTRACT_FACT_FIELDS = [
+  ['serviceRequestSummary','実際の依頼業務概要（対象外を切り分けた内容、単なる語の削除で受託可にしない）'],
+  ['serviceScopeReviewEvidence','受託範囲の担当者確認：確認日・確認者・適用法令/資格要件・対象外との切り分け・必要な確認先'],
   ['originalContractId','参照する締結済み原契約の文書ID（NDA主契約参照・DPA）'],
   ['originalContractVersion','参照する締結済み原契約の版（公開最新版ではなく合意した版）'],
   ['originalContractSignedOn','原契約の実際の締結日 YYYY-MM-DD（提供開始日とは別）'],
@@ -49,7 +52,7 @@ export function missingContractFacts(c: CaseRecord, docType = 'mainContract'): s
     const date = f.orderReceivedOn ?? '';
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(Date.parse(date)) || new Date(date).toISOString().slice(0,10) !== date) missing.push('確認済みの発注日');
   }
-  if (c.contractTemplateVersion === APPROVED_TERMS_VERSION) {
+  if (hasRevisedContractFacts(c.contractTemplateVersion)) {
     const require = (key: keyof ContractFacts) => { if (!f[key]?.trim()) missing.push(label[key] ?? key); };
     const requireDate = (key: keyof ContractFacts) => { const v=f[key]??''; if (!/^\d{4}-\d{2}-\d{2}$/.test(v)||!Number.isFinite(Date.parse(v))||new Date(v).toISOString().slice(0,10)!==v) missing.push(label[key]??key); };
     if (docType==='nda') {
@@ -65,6 +68,7 @@ export function missingContractFacts(c: CaseRecord, docType = 'mainContract'): s
     if(docType==='deliveryReceipt') requireDate('actualAcceptanceOn');
     if(docType==='completionReport') { require('completionSettlement');require('completionAiEvidence');require('completionEvidence'); }
   }
+  const scopeBlock=serviceScopeBlock(c,docType);if(scopeBlock) missing.push(scopeBlock);
   return [...new Set(missing)];
 }
 
@@ -72,6 +76,7 @@ export function contractFactsContext(c: CaseRecord): Record<string,string> {
  const f = c.contractFacts ?? {};
  const unused = f.aiUse === 'none';
  return {
+  '依頼業務概要':f.serviceRequestSummary??'', '受託業務区分':SERVICE_SCOPE_LABELS[f.serviceScopeClassification??'']??'', '受託範囲確認記録':f.serviceScopeReviewEvidence??'',
   '原契約ID':f.originalContractId??'', '原契約版':f.originalContractVersion??'', '原契約締結日':f.originalContractSignedOn??'',
   'DPA実施確認':f.dpaImplementationEvidence??'', '実際の検収日':f.actualAcceptanceOn??'',
   '完了精算確認':f.completionSettlement??'', '完了AI確認':f.completionAiEvidence??'', '実際の完了確認':f.completionEvidence??'',

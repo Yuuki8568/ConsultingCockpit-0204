@@ -1,3 +1,4 @@
+import { SERVICE_SCOPE_NOTICE } from '../../domain/data/service-scope';
 /**
  * 案件まるごとの書き出し。Excel・Word・印刷の3通り。
  * v3 の exportExcel / exportWord / printSheet に相当する。
@@ -340,7 +341,7 @@ function buildSections(c: CaseRecord): WordSection[] {
 
 const FOOTER =
   "※ 削減時間・金額換算は概算であり、成果を保証するものではありません（免責事項 第6条）。\n" +
-  "※ 補助金等の申請書類作成代行は行政書士の業務範囲です（行政書士法第19条）。当方は情報提供と、お客様ご自身が作成される書類への助言までを行います。";
+  SERVICE_SCOPE_NOTICE;
 
 export function exportCaseWord(c: CaseRecord, state: VaultState): void {
   const company = c.settings.companyName || "無題";

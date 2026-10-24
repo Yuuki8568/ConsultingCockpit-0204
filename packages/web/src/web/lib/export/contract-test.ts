@@ -1,7 +1,7 @@
 import { unresolvedContractMarkers } from '../../domain/logic/contract-placeholders';
 /** Read-only template inspection. Never issues documents or updates a case/vault. */
 import type { CaseRecord, VaultState } from '../../domain/types';
-import { templatesForVersion, APPROVED_TERMS_VERSION } from '../../domain/data/contract-revisions';
+import { templatesForVersion, APPROVED_TERMS_VERSION } from '../../domain/data/contract-latest';
 import { DOC_TYPE_DEFS } from '../../domain/data/doc-templates';
 import { fillTemplate, gatherTemplateContext } from '../../domain/logic/docs';
 import { missingContractFacts } from '../../domain/logic/contract-facts';

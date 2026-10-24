@@ -1,5 +1,6 @@
+import { serviceScopeBlock } from './service-scope';
 import type { CaseRecord } from '../types';
-import { isApprovedVersion } from '../data/contract-revisions';
+import { isApprovedVersion } from '../data/contract-latest';
 import { monthlyRenewalDates } from './renewal';
 
 /** Only manually verified facts; no status is inferred from viewing a reminder. */
@@ -48,6 +49,8 @@ export function contractActions(c: CaseRecord, missingFacts: readonly string[], 
   if (!verifiedCalendarDate(today)) throw new Error('日本時間の有効な基準日が必要です');
   if (!isApprovedVersion(c.contractTemplateVersion)) return [{ id: 'legacy', title: '保存済みの契約条件を確認', detail: 'この案件には新版の期限を当てはめません。締結済みの条件・期限を個別に確認してください。', target: 'conditions', urgency: 'info' }];
   const actions: ContractAction[] = [];
+  const scopeBlock=serviceScopeBlock(c);
+  if(scopeBlock) actions.push({id:'service-scope',title:'受託・着手前の業務範囲確認',detail:scopeBlock,target:'conditions',urgency:'input'});
   const addDue = (id: string, title: string, detail: string, target: ContractActionTarget, date: string) => {
     const urgency = date < today ? 'overdue' : date <= shift(today, 3) ? 'due' : 'upcoming';
     actions.push({ id, title, detail, target, dueOn: date, urgency });

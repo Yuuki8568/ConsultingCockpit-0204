@@ -1,5 +1,5 @@
 // 元アプリ v3 の書類採番・差し込み・雛形展開ロジックを移植（差し込みキーは一字一句同一）
-import { isApprovedVersion, APPROVED_TERMS_VERSION } from "../data/contract-revisions";
+import { isApprovedVersion, hasRevisedContractFacts } from "../data/contract-latest";
 import { unresolvedContractMarkers } from './contract-placeholders';
 import { contractFactsContext, missingContractFacts } from "./contract-facts";
 import { grossTaxBreakdown } from "./tax";
@@ -90,7 +90,7 @@ export function gatherTemplateContext(c: CaseRecord, state: VaultState): Record<
   const menuItem = menuId ? SERVICE_MENU_ITEMS.find((m) => m.id === menuId) : null;
   ctx['支援内容'] = menuItem ? buildServiceSummaryText(menuItem) : '（④単価設計で支援メニューを選ぶと、ここに「何を・どれくらい・お渡しするもの・含まないもの」が自動で入ります）';
   if (c.contractTemplateVersion) ctx['支援内容'] = c.contractFacts?.scopeAndDeliverables ?? '';
-  if (c.contractTemplateVersion === APPROVED_TERMS_VERSION) { ctx['甲代表者肩書']=k.representativeTitle||''; ctx['検収基準']=c.contractFacts?.acceptanceAndCompletion??''; }
+  if (hasRevisedContractFacts(c.contractTemplateVersion)) { ctx['甲代表者肩書']=k.representativeTitle||''; ctx['検収基準']=c.contractFacts?.acceptanceAndCompletion??''; }
   return { ...ctx, ...contractFactsContext(c) };
 }
 
@@ -219,7 +219,7 @@ export function documentReleaseBlock(c: CaseRecord, doc: CaseRecord['generatedDo
 export function recheckDocumentRelease(c: CaseRecord, docId: string): string | null {
  const doc=c.generatedDocs.find(d=>d.id===docId);
  if (!doc || isSignedDocument(c,doc)) return '締結済み・存在しない書類は再確認で変更できません。';
- if(doc.templateVersion!==APPROVED_TERMS_VERSION||c.contractTemplateVersion!==doc.templateVersion||doc.releaseBlockKind!=='case_facts_review') return 'この書類の保存された制限は自動解除の対象外です。';
+ if(!hasRevisedContractFacts(doc.templateVersion)||c.contractTemplateVersion!==doc.templateVersion||doc.releaseBlockKind!=='case_facts_review') return 'この書類の保存された制限は自動解除の対象外です。';
  const missing=[...missingContractFacts(c,doc.docType),...unresolvedContractMarkers(doc.content)];
  if(!doc.content?.trim()||missing.length) return '案件条件・保存本文の未確認を解消してください：'+missing.join('、');
  delete doc.releaseBlocked;

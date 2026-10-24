@@ -1,3 +1,4 @@
+import { SERVICE_SCOPE_NOTICE, ADMINISTRATIVE_SCRIVENER_EXPLANATION } from '../../domain/data/service-scope';
 import { recheckDocumentRelease } from '../../domain/logic/docs';
 import { unresolvedContractMarkers } from '../../domain/logic/contract-placeholders';
 /** ⑨契約・法務チェック — 書類の状態管理・チェックリスト・書類生成・9書類まとめ出力 */
@@ -13,7 +14,7 @@ import {
   Panel,
   Sec,
 } from "../../components/kit";
-import { APPROVED_TERMS_VERSION, isApprovedVersion, templatesForVersion } from "../../domain/data/contract-revisions";
+import { hasRevisedContractFacts, isApprovedVersion, templatesForVersion } from "../../domain/data/contract-latest";
 import { ContractActionPanel } from "../../components/contract-action-panel";
 import { ContractFactsPanel } from "../../components/contract-facts-panel";
 import { missingContractFacts } from "../../domain/logic/contract-facts";
@@ -157,7 +158,7 @@ export function CaseLegal() {
           content: filled.text,
           status: "draft",
           releaseBlocked,
-          releaseBlockKind: releaseBlocked && templateVersion===APPROVED_TERMS_VERSION ? "case_facts_review" : undefined,
+          releaseBlockKind: releaseBlocked && hasRevisedContractFacts(templateVersion) ? "case_facts_review" : undefined,
           templateVersion,
         });
         const sk = statusKey(docType);
@@ -217,7 +218,7 @@ export function CaseLegal() {
               .map((m) => `・${m}`)
               .join("\n")
           : "空欄はありません。") +
-        `\n\n※ すべての書類は「免責事項(第3版)」と一体で運用します。\n※ 補助金の申請書類作成代行は行政書士の業務範囲です（行政書士法第19条）。当方は情報提供と、お客様ご自身が作成する書類への助言までを行います。\n`,
+        `\n\n※ すべての書類は「免責事項(第3版)」と一体で運用します。\n${SERVICE_SCOPE_NOTICE}\n`,
     });
     downloadZip(`${company}_契約書類一式_${new Date().toISOString().slice(0, 10)}`, entries);
     audit("nine_docs_export", { company: c.settings.companyName });
@@ -445,22 +446,22 @@ export function CaseLegal() {
 
       <Panel
         title="補助金について"
-        note="どこまでやるかの線は法律で決まっています。ここを越えないでください。"
+        note="事務所の受託対象外と法令上の制限を区別します。個別の法的分類を自動認定しません。"
       >
         <Grid cols={2}>
           <div className="rounded-sm border border-ok/40 bg-ok/8 px-3 py-2.5">
             <div className="mb-1.5 text-[12px] font-medium text-ok">できること</div>
             <ul className="space-y-1 text-[12px] leading-relaxed text-paper-dim">
               <li>・活用できそうな制度の情報提供</li>
-              <li>・お客様ご自身が作る事業計画書への助言</li>
+              <li>・通常の業務改善支援（実質的な申請書類の代筆・作成を除く）</li>
               <li>・AI導入計画の設計・伴走支援</li>
-              <li>・提携する行政書士の紹介（紹介料は受け取らない）</li>
+              <li>・制度・業務に応じた適切な専門家への相談案内（提携の有無は要確認）</li>
             </ul>
           </div>
           <div className="rounded-sm border border-alert/40 bg-alert/8 px-3 py-2.5">
             <div className="mb-1.5 text-[12px] font-medium text-alert">できないこと</div>
             <ul className="space-y-1 text-[12px] leading-relaxed text-paper-dim">
-              <li>・申請書・事業計画書の有償での作成代行</li>
+              <li>・申請書類・申請用事業計画書の作成代行・実質的な代筆</li>
               <li>・成功報酬型での申請支援</li>
               <li>・申請システムへの代理入力・代理提出</li>
               <li>・採択されるという説明</li>
@@ -469,7 +470,7 @@ export function CaseLegal() {
         </Grid>
         <div className="mt-3">
           <Note tone="alert">
-            改正行政書士法第19条により、名目を問わず無資格での有償作成代行は認められません。
+            {SERVICE_SCOPE_NOTICE}<br />{ADMINISTRATIVE_SCRIVENER_EXPLANATION}
             提案書にもこの範囲を明記してください（②の提案書骨子には自動で入ります）。
           </Note>
         </div>
