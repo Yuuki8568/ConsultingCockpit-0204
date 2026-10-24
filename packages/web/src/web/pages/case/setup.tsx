@@ -1,3 +1,4 @@
+import { legacyNetToGross, grossToLegacyNet } from "../../domain/logic/pricing";
 /** ①案件設定 — 企業情報・面談条件・契約書に差し込む甲情報・タイミング・観の目・推奨メニュー */
 import { useCurrentCase } from "../../hooks/use-current";
 import { useVault } from "../../hooks/use-vault";
@@ -7,9 +8,9 @@ import type { FdeProductKind } from "../../domain/types";
 /** FDE商品区分（2026-09-20統合資料。料金は内部提案値で公開料金ではない） */
 const FDE_PRODUCTS: [FdeProductKind, string][] = [
   ["", "未設定"],
-  ["diagnosis", "業務適合診断（内部提案値 5万円/回）"],
-  ["build", "限定構築（同 15万円×4段階）"],
-  ["monthly", "月次運用管理支援（同 25万円/月・最初の価格仮説）"],
+  ["diagnosis", "業務適合診断（内部提案値 5.5万円/回・税込）"],
+  ["build", "限定構築（同 16.5万円×4段階・税込）"],
+  ["monthly", "月次運用管理支援（同 27.5万円/月・税込・最初の価格仮説）"],
   ["change", "変更実装（個別見積り）"],
   ["inspection", "低頻度点検・内製移行（範囲別見積り）"],
 ];
@@ -405,15 +406,15 @@ export function CaseSetup() {
         </Grid>
         <Grid cols={2} className="mt-3">
           <NumField
-            label="提案額（円・税抜）"
-            value={c.fde?.proposalAmount ?? 0}
-            onChange={(v) => void patch((x) => void (x.fde && (x.fde.proposalAmount = v)))}
+            label="提案額（円・税込）"
+            value={legacyNetToGross(c.fde?.proposalAmount ?? 0)}
+            onChange={(v) => void patch((x) => void (x.fde && (x.fde.proposalAmount = grossToLegacyNet(v))))}
             hint="0は未入力。0円と確認できた場合だけ0のままにします。"
           />
           <NumField
-            label="契約額（円・税抜）"
-            value={c.fde?.contractAmount ?? 0}
-            onChange={(v) => void patch((x) => void (x.fde && (x.fde.contractAmount = v)))}
+            label="契約額（円・税込）"
+            value={legacyNetToGross(c.fde?.contractAmount ?? 0)}
+            onChange={(v) => void patch((x) => void (x.fde && (x.fde.contractAmount = grossToLegacyNet(v))))}
           />
         </Grid>
         <Grid cols={2} className="mt-3">

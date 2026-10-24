@@ -8,6 +8,7 @@ import { computeCaseProgress, collectAllNextActions, classifyDue, sanpoHasConcer
 import { relativeTime } from "../domain/logic/util";
 import { LEAD_STATUS_LABEL } from "../domain/data/sales";
 import type { Mode } from "../domain/types";
+import { BackupBadge } from "./automatic-backup";
 import { Mask } from "./mask";
 
 interface ShellProps {
@@ -148,7 +149,7 @@ export function Shell({
 
       {/* ---- 作業領域 ---- */}
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="rise rise-1 sticky top-0 z-20 flex items-center gap-2 border-b border-line bg-ink-900/95 px-3 py-2 backdrop-blur lg:px-4">
+        <header className="rise rise-1 sticky top-0 z-20 flex flex-wrap items-center gap-2 border-b border-line bg-ink-900/95 px-3 py-2 backdrop-blur lg:px-4">
           <button
             className="btn btn-ghost btn-sm lg:hidden"
             onClick={() => setSidebarOpen((v) => !v)}
@@ -176,6 +177,7 @@ export function Shell({
           <div className="flex-1" />
 
           <SyncBadge />
+          <BackupBadge onOpenSettings={onOpenSettings} />
 
           <button
             className={`btn btn-sm ${masked ? "btn-primary" : ""}`}

@@ -1,9 +1,11 @@
+import { MAX_SYNC_RECORDS } from "../../shared/sync-limits";
 import { ORPCError } from "@orpc/server";
 import { and, eq, gt, inArray, sql } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "../database";
 import * as schema from "../database/schema";
 import { authed } from "../middleware/auth";
+import { classifySyncError } from "../sync-diagnostics";
 
 /**
  * 差分同期。
@@ -65,18 +67,23 @@ export const sync = {
         deviceId: z.string().min(4).max(64),
         generation: z.number().int().min(1),
         since: z.number().int().min(0).default(0),
-        records: z.array(recordInput).max(500),
+        records: z.array(recordInput).max(MAX_SYNC_RECORDS, "同期の更新が必要です。ページを再読み込みしてください。"),
       }),
     )
     .handler(async ({ context, input }) => {
       const uid = context.user.id;
+      let stage = "device-check";
+      try {
       await assertDeviceActive(uid, input.deviceId);
 
-      return db.transaction(async tx => {
+      stage = "transaction-open";
+      return await db.transaction(async tx => {
+      stage = "vault-read";
       const [v] = await tx.select().from(schema.vault).where(eq(schema.vault.userId, uid));
       if (!v) throw new ORPCError("NOT_FOUND", { message: "金庫が未作成です" });
       if (v.generation !== input.generation) throw new ORPCError("CONFLICT", { message: "鍵が変更されました。再解錠してください" });
       if (new Set(input.records.map(r => r.id)).size !== input.records.length) throw new ORPCError("BAD_REQUEST");
+      stage = "sequence-read";
       const [maximum] = await tx.select({ value: sql<number>`coalesce(max(${schema.record.seq}), 0)` }).from(schema.record).where(eq(schema.record.userId, uid));
       let nextSeq = Math.max(Date.now(), Number(maximum?.value ?? 0));
 
@@ -91,6 +98,7 @@ export const sync = {
 
       if (input.records.length > 0) {
         const ids = input.records.map((r) => r.id);
+        stage = "existing-records-read";
         const existing = await tx
           .select()
           .from(schema.record)
@@ -101,6 +109,7 @@ export const sync = {
         for (const r of input.records) {
           const cur = byId.get(r.id);
           if (!cur) {
+            stage = "record-insert";
             await tx.insert(schema.record).values({
               id: r.id,
               userId: uid,
@@ -130,6 +139,7 @@ export const sync = {
                 losingSide: "server",
               });
             }
+            stage = "record-update";
             await tx
               .update(schema.record)
               .set({
@@ -159,6 +169,7 @@ export const sync = {
       }
 
       // pull: since より新しい行
+      stage = "changed-records-read";
       const changed = await tx
         .select()
         .from(schema.record)
@@ -182,10 +193,12 @@ export const sync = {
       }
       const acceptedVersions: Record<string, number> = {};
       if (accepted.length) {
+        stage = "accepted-records-read";
         const saved = await tx.select().from(schema.record).where(and(eq(schema.record.userId, uid), inArray(schema.record.id, accepted)));
         for (const row of saved) acceptedVersions[row.id] = row.seq;
       }
 
+      stage = "transaction-commit";
       return {
         generation: v.generation,
         accepted,
@@ -205,6 +218,17 @@ export const sync = {
         hasMore: fullPage,
       };
       });
+      } catch (error) {
+        if (!(error instanceof ORPCError) || error.status >= 500) {
+          console.error(JSON.stringify({
+            event: "sync_push_failed",
+            stage,
+            recordCount: input.records.length,
+            ...classifySyncError(error),
+          }));
+        }
+        throw error;
+      }
     }),
 
   /** 初回・復旧用の全件取得。失効端末からは取得できない。 */

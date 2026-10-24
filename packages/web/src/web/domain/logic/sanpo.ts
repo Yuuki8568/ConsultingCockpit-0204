@@ -1,3 +1,4 @@
+import { legacyNetToGross } from "./pricing";
 /**
  * ⑩三方良しへの自動転記（仮プラン確定時）。
  *
@@ -109,7 +110,7 @@ export function buildSanpoAutofill(c: CaseRecord): Partial<Record<SanpoAutoKey, 
     if (durationLabel) lines.push(`期間: ${durationLabel}`);
     if (result && hours)
       lines.push(
-        `時間あたりの目安: 約${formatYen(Math.round(result.recommended / hours))}円/h（推奨プラン税抜 ÷ 工数）`,
+        `時間あたりの目安: 約${formatYen(Math.round(legacyNetToGross(result.recommended) / hours))}円/h（推奨プラン税込 ÷ 工数）`,
       );
     if (contractLabel) lines.push(`契約形態: ${contractLabel}`);
     if (menu)
@@ -162,7 +163,7 @@ export function buildSanpoAutofill(c: CaseRecord): Partial<Record<SanpoAutoKey, 
       const bits: string[] = [];
       if (hasEstimate) bits.push(`${formatYen(est.totalIncTax)}円（税込）`);
       else if (result)
-        bits.push(`推奨プラン換算 ${formatYen(Math.round(result.recommended * 1.1))}円（税込）`);
+        bits.push(`推奨プラン換算 ${formatYen(legacyNetToGross(result.recommended))}円（税込）`);
       if (hours) bits.push(`工数 ${hours}時間`);
       if (durationLabel) bits.push(durationLabel);
       lines.push(bits.length > 0 ? `${head}: ${bits.join("・")}` : head);

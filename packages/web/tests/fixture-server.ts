@@ -6,7 +6,7 @@ const temp = mkdtempSync(join(tmpdir(), 'cockpit-blackbox-'));
 Object.assign(process.env, { NODE_ENV:'production', DATABASE_URL:`file:${temp}/test.db`,
  DATABASE_AUTH_TOKEN:'', WEBSITE_URL:'http://127.0.0.1:4420', OWNER_EMAILS:'owner@example.invalid',
  BETTER_AUTH_SECRET:'isolated-test-secret-not-for-production-000000000000',
- APPLICATION_ID:'isolated-fixture', VITE_RUNABLE_AUTH_ISSUER:'https://example.invalid/auth' });
+ GOOGLE_CLIENT_ID:'fixture', GOOGLE_CLIENT_SECRET:'fixture' });
 const { db } = await import('../src/api/database');
 const schema = await import('../src/api/database/schema');
 const { pushSQLiteSchema } = await import('drizzle-kit/api');

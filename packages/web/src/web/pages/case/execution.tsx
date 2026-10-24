@@ -1,3 +1,4 @@
+import { serviceScopeBlock, executionScopeMutationBlock } from '../../domain/logic/service-scope';
 /** ⑥実行管理 — タスク・成果物・KPI・枕をおさえる・三つの喜び・規矩・知見台帳 */
 import { useCurrentCase } from "../../hooks/use-current";
 import { useVault } from "../../hooks/use-vault";
@@ -128,8 +129,11 @@ export function CaseExecution() {
   const ex = c.execution;
   const setEx = (fn: (e: Execution) => void) =>
     void patch((x) => {
-      if (!x.execution) x.execution = emptyExecution();
-      fn(x.execution);
+      const draft=structuredClone(x.execution ?? emptyExecution());
+      fn(draft);
+      const block=executionScopeMutationBlock(x,x.execution,draft);
+      if(block) {window.alert(block);return;}
+      x.execution=draft;
     });
 
   if (!ex) {
@@ -161,6 +165,7 @@ export function CaseExecution() {
 
   return (
     <div className="space-y-4">
+      {serviceScopeBlock(c) && <Note tone="warn">{serviceScopeBlock(c)} 新たな着手・受託拡大の操作を停止します。過去記録は保持し、既存契約の義務を一方的に解除するものではありません。必要な対応は確認してください。</Note>}
       <Panel title="契約の期間">
         <Grid cols={3}>
           <Select

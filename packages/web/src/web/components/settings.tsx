@@ -33,6 +33,7 @@ import { SEC_CONFIG } from "../lib/security";
 import { buildEncryptedBackup, decryptBackup, isEncryptedBackup } from "../lib/export/backup";
 import { deviceIdFor, vaultStore } from "../lib/store/vault-store";
 import { useDesktop } from "../hooks/use-desktop";
+import { AutomaticBackupSettings } from "./automatic-backup";
 import { DesktopBackup } from "./desktop-backup";
 
 type Tab = "profile" | "templates" | "messages" | "referrals" | "security" | "data";
@@ -138,10 +139,11 @@ function TemplatesTab() {
       <Note tone="info">
         雛形の中の <code>{"{{甲企業名}}"}</code> のような部分は、書類を作るときに
         案件情報と受託者プロフィールから自動で埋まります。
+        ここは旧案件用の保存雛形です。新規案件の2026-10-23承認版は版を固定して別管理し、この画面の上書きでは更新しません。新規版の案件条件は⑨契約・法務の案件条件・情報管理票から確認してください。
       </Note>
 
       <Panel
-        title="12種類の雛形"
+        title="旧案件用・12種類の保存雛形"
         right={
           <ConfirmButton
             label="組込雛形で全部上書き"
@@ -968,6 +970,7 @@ function DataTab() {
         )}
       </Panel>
 
+      <AutomaticBackupSettings />
       <DesktopBackup />
 
       <Panel
