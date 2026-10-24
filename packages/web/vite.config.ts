@@ -2,6 +2,7 @@ import { defineConfig, loadEnv, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwind from "@tailwindcss/vite"
 import path from "path";
+import { execFileSync } from "node:child_process";
 
 
 import assetOptimizerPlugin from "./vite/__plugins/asset-optimizer-plugin";
@@ -33,6 +34,7 @@ export default defineConfig(({ mode }) => {
 	Object.assign(process.env, env);
 
 	return {
+        define: { __APP_SOURCE_VERSION__: JSON.stringify(process.env.GITHUB_SHA || execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim()) },
 		// All env files live at the repo root — keep Vite's own env loading there too,
 		// so packages/web/.env* files can never shadow the root .env.
 		envDir: root,

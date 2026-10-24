@@ -10,7 +10,7 @@ export interface ZipEntry {
   content: string | Uint8Array;
 }
 
-export function downloadZip(fileName: string, entries: ZipEntry[]): void {
+export function buildZip(entries: ZipEntry[]): Uint8Array {
   const files: Record<string, Uint8Array> = {};
   for (const e of entries) {
     const safe = e.name.replace(/[\\:*?"<>|]/g, "_");
@@ -20,7 +20,11 @@ export function downloadZip(fileName: string, entries: ZipEntry[]): void {
           strToU8("﻿" + e.content)
         : e.content;
   }
-  const zipped = zipSync(files, { level: 6 });
+  return zipSync(files, { level: 6 });
+}
+
+export function downloadZip(fileName: string, entries: ZipEntry[]): void {
+  const zipped = buildZip(entries);
   const blob = new Blob([zipped as unknown as BlobPart], { type: "application/zip" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);

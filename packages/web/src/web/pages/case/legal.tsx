@@ -21,6 +21,7 @@ import { LEGAL_CHECKLIST_ITEMS } from "../../domain/data/diagnosis-legal";
 import { fillTemplate, gatherTemplateContext, generateDocNo, contextWithDocNo, savedDocumentsForExport, isSignedDocument, referencedDocument, changeDocumentStatus, changeDocumentSignedAt, documentReleaseBlock } from "../../domain/logic/docs";
 import { safeFileName } from "../../domain/logic/util";
 import { buildWordHtml } from "../../lib/export/word";
+import { ContractTestExport } from "../../components/contract-test-export";
 import { downloadZip } from "../../lib/export/zip";
 import { vaultStore } from "../../lib/store/vault-store";
 import { docViewer } from "../../lib/store/doc-viewer-store";
@@ -235,6 +236,7 @@ export function CaseLegal() {
         else void mutate((s) => { s.currentTab = target === "payment" ? "pricing" : "support"; }, ["meta:app"]);
       }} />
       {c.contractTemplateVersion === APPROVED_TERMS_VERSION && <ContractFactsPanel c={c} onChange={(facts) => { void patch((x) => { x.contractFacts = facts; }); }} />}
+      <ContractTestExport c={c} state={state} sourceVersion={__APP_SOURCE_VERSION__} />
       <Panel
         title="書類の状態"
         note="書類の管理状態です。状態表示だけで契約の有効性や業務の完了を判定しません。一括出力は保存済み本文のみを使います。"
