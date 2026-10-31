@@ -388,26 +388,31 @@ function SecurityTab() {
   const [conflicts, setConflicts] = useState<{ id: string; at: number }[]>([]);
   const [busy, setBusy] = useState(false);
   const [rekeyOpen, setRekeyOpen] = useState(false);
+  const [loadErrors, setLoadErrors] = useState<Record<string,string>>({});
+  const [loading, setLoading] = useState(false);
+  const loadVersion = useRef(0);
   const myId = deviceIdFor();
 
   const load = async () => {
-    try {
-      const [d, h, c] = await Promise.all([
-        client.devices.list(),
-        client.devices.loginHistory({ limit: 50 }),
-        client.audit.count(),
-      ]);
-      setDevices(d as never);
-      setHistory(h as never);
-      setAuditCount(c.count);
-      setConflicts((await vaultStore.listConflicts()).map((x) => ({ id: x.id, at: x.at })));
-    } catch {
-      /* 通信できないときは表示しない */
-    }
+    const version = ++loadVersion.current;
+    setLoading(true);
+    const results = await Promise.allSettled([
+      client.devices.list(), client.devices.loginHistory({ limit: 50 }), client.audit.count(), vaultStore.listConflicts(),
+    ]);
+    if (version !== loadVersion.current) return;
+    const errors: Record<string,string> = {};
+    const [d,h,c,f] = results;
+    if(d.status==='fulfilled') setDevices(d.value); else { setDevices([]); errors.devices='端末一覧を取得できません。ログイン状態と通信を確認して再取得してください。'; }
+    if(h.status==='fulfilled') setHistory(h.value); else { setHistory([]); errors.history='ログイン履歴を取得できませんでした。端末一覧の取得とは別のエラーです。'; }
+    if(c.status==='fulfilled') setAuditCount(c.value.count); else { setAuditCount(null); errors.audit='操作記録の件数を取得できませんでした。'; }
+    if(f.status==='fulfilled') setConflicts(f.value.map(x=>({id:x.id,at:x.at}))); else { setConflicts([]); errors.conflicts='端末内の競合記録を取得できませんでした。'; }
+    setLoadErrors(errors);
+    setLoading(false);
   };
 
   useEffect(() => {
     void load();
+    return () => { ++loadVersion.current; };
   }, []);
 
   if (!state) return null;
@@ -454,7 +459,7 @@ function SecurityTab() {
         </div>
       </Panel>
 
-      <Panel title="同期の状態" right={<button className="btn btn-sm" onClick={() => void load()}>更新</button>}>
+      <Panel title="同期の状態" right={<button className="btn btn-sm" disabled={loading} onClick={() => void load()}>{loading ? "取得中…" : "更新"}</button>}>
         <Grid cols={3}>
           <Stat
             label="未送信"
@@ -474,6 +479,7 @@ function SecurityTab() {
         )}
       </Panel>
 
+      {Object.entries(loadErrors).filter(([key])=>key!=="devices").map(([key,message])=><Note key={key} tone="alert">{message}</Note>)}
       {conflicts.length > 0 && (
         <Panel title="同じ場所を別々に直した記録" note="後から保存した側を採用し、負けた側をここに残しています。">
           <div className="space-y-1.5">
@@ -502,8 +508,8 @@ function SecurityTab() {
       )}
 
       <Panel title="この金庫を開いている端末" note="使わなくなった端末は失効させてください。">
-        {devices.length === 0 ? (
-          <Empty>取得できませんでした。</Empty>
+        {loading ? <Empty>端末一覧を取得中…</Empty> : loadErrors.devices ? <div className="space-y-2"><Note tone="alert">{loadErrors.devices}</Note><button className="btn btn-primary" onClick={() => void load()}>再取得</button></div> : devices.length === 0 ? (
+          <Empty>登録済みの端末はありません。</Empty>
         ) : (
           <table className="tbl">
             <thead>
