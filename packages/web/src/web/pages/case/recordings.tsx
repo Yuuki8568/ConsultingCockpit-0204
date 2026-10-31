@@ -283,16 +283,22 @@ export function CaseRecordings() {
       </Note>
 
       <div className="mt-3 space-y-2 rounded-sm border border-line p-3">
-        <p className="text-sm">精密モードで文字起こし</p>
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="text-sm">精密モードで文字起こし</p>
+          <span className={`rounded-full border px-2 py-0.5 text-xs font-medium ${connected ? "border-emerald-600 bg-emerald-50 text-emerald-800" : "border-amber-500 bg-amber-50 text-amber-900"}`}>
+            {connected ? "接続済み" : "未接続"}
+          </span>
+        </div>
         <p className="text-xs text-paper-faint">初回は <a className="underline" href="/downloads/Cockpit-Local-Transcriber-Intel-Mac.zip" download>Mac用補助ツール</a> を展開して Setup.command を実行します。利用時は Connect-Cockpit.command を開き、表示された接続キーを貼り付けてください。</p>
         <input aria-label="端末内の接続キー" placeholder="接続キーを入力してください" type="password" autoComplete="off" value={connectionKey} disabled={connected || !!importing || !!recognizing} onChange={e => setConnectionKey(e.target.value)} className="w-full rounded border border-line bg-ink-850 p-2 placeholder:text-paper-faint" />
-        <button type="button" disabled={!connectionKey.trim() || !!importing || !!recognizing} onClick={async () => {
+        <button type="button" className="btn btn-primary" disabled={!connectionKey.trim() || !!importing || !!recognizing} onClick={async () => {
           if (connected) { setConnected(false); setConnectionKey(""); setLocalStatus(""); return; }
           const controller = new AbortController(); recognitionAbort.current = controller;
           try { await connectLocal(connectionKey.trim(), controller.signal); if (!controller.signal.aborted) { setConnectionKey(connectionKey.trim()); setConnected(true); setLocalStatus("接続済み。ファイルを読み込み、一覧の「文字起こしを開始」を押してください。"); } }
           catch { if (!controller.signal.aborted) setLocalStatus("接続できません。補助ツールの起動・接続キー・ブラウザーのローカル接続許可を確認してください。"); }
           finally { recognitionAbort.current = null; }
         }}>{connected ? "接続を解除" : "端末内ツールに接続"}</button>
+        {!connected && !connectionKey.trim() && <p className="text-xs text-paper-dim">接続キーを入力すると、色付きの接続ボタンを押せます。</p>}
         <p className="text-xs text-paper-faint">動画 → 音声WAVの作成 → 精密文字起こし。音声ファイルは抽出工程を省いて認識します。発言は短縮しません。接続キーは保存・同期しません。ブラウザーにローカル接続の許可が表示されたら許可してください。</p>
         <p className="text-xs text-paper-faint">補助ツールの結果・抽出WAVはMacの Documents/CockpitTranscripts に保存されます。接続しない場合は録音の登録と確認済みJSONの手動取り込みを利用できます。</p>
         {localStatus && <p role="status" className="text-sm">{localStatus}</p>}
