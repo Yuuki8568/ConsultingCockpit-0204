@@ -91,6 +91,44 @@ console.log({largeImportRequiresVerifiedArchive:true});
 await page.evaluate(async()=>{const meta={...store.getState().cases[0].recordings[0],id:'missing-browser-body',name:'cinestudy_restaurant_shot04_edit.mp4',sourceOnly:false};await store.mutate(s=>s.cases[0].recordings.push(meta));await backup.runBackup(true);const c=await backup.getBackupConfig();if(!c.issues.some(i=>i.recordId===meta.id&&i.reason.includes('この端末にありません')))throw Error('missing body diagnosis');});
 console.log({directOriginalFilePicker:true,sizeMismatchDetails:true,unicodeFilenameNormalization:true,missingBrowserBodyExplained:true});
 
+// Verify explicit start, activity feedback, cancellation and retry against a local-tool stub.
+let jobPosts=0, finishJob=false;
+await page.route('http://127.0.0.1:8765/**',async route=>{
+ const req=route.request(),path=new URL(req.url()).pathname;
+ const headers={'Access-Control-Allow-Origin':'*','Access-Control-Allow-Headers':'*','Access-Control-Allow-Methods':'GET, POST, DELETE, OPTIONS','Access-Control-Allow-Private-Network':'true'};
+ let body={};
+ if(path==='/health')body={protocol:1,mode:'accurate'};
+ else if(req.method()==='POST'){jobPosts++;body={id:'a'.repeat(32)};}
+ else if(req.method()==='DELETE')body={status:'cancelled'};
+ else body=finishJob?{status:'done',model:'Systran/faster-whisper-medium',revision:'08e178d48790749d25932bbc082711ddcfdfbc4f',sourceKind:'audio',sourceName:'sample.wav',durationSeconds:1,segments:[{start:0,end:1,text:'テスト文字起こし'}]}:{status:'running',stage:'transcribing',processedSeconds:0,durationSeconds:1};
+ await route.fulfill({status:200,headers,contentType:'application/json',body:JSON.stringify(body)});
+});
+await page.getByPlaceholder('接続キーを入力してください').fill('test-only-key');
+await page.getByRole('button',{name:'端末内ツールに接続',exact:true}).click();
+await page.getByText('接続済み。ファイルを読み込み、一覧の「文字起こしを開始」を押してください。',{exact:true}).waitFor();
+const countBefore=await page.evaluate(()=>store.getState().cases[0].recordings.length);
+await page.evaluate(()=>{
+ const bytes=new Uint8Array(8044),v=new DataView(bytes.buffer);const str=(o,t)=>[...t].forEach((c,i)=>bytes[o+i]=c.charCodeAt(0));str(0,'RIFF');v.setUint32(4,8036,true);str(8,'WAVEfmt ');v.setUint32(16,16,true);v.setUint16(20,1,true);v.setUint16(22,1,true);v.setUint32(24,8000,true);v.setUint32(28,8000,true);v.setUint16(32,1,true);v.setUint16(34,8,true);str(36,'data');v.setUint32(40,8000,true);
+ const transfer=new DataTransfer();transfer.items.add(new File([bytes],'manual-start.wav',{type:'audio/wav'}));const input=document.querySelector('input[type=file]');input.files=transfer.files;input.dispatchEvent(new Event('change',{bubbles:true}));
+});
+await page.getByText('ファイルを読み込みました。下の一覧から「文字起こしを開始」を押してください。',{exact:true}).waitFor();
+if(await page.evaluate(()=>store.getState().cases[0].recordings.length)!==countBefore+1)throw Error('manual import failed');
+if(jobPosts!==0)throw Error('recognition started without explicit action');
+await page.getByRole('button',{name:'文字起こしを開始',exact:true}).first().click();
+await page.locator('[role=status] .animate-spin').waitFor();
+await page.getByText('精密文字起こし中: 0 / 1秒',{exact:true}).first().waitFor();
+if(jobPosts!==1)throw Error('explicit start did not create exactly one job');
+if(await page.getByRole('button',{name:'映像・音声ファイルを読み込む'}).isEnabled())throw Error('import allowed during recognition');
+await page.getByRole('button',{name:'文字起こしを中止',exact:true}).click();
+await page.getByText('文字起こしを中止しました。再度開始できます。',{exact:true}).waitFor();
+await page.locator('[role=status] .animate-spin').waitFor({state:'detached'});
+finishJob=true;
+await page.getByRole('button',{name:'文字起こしを開始',exact:true}).first().click();
+await page.getByText('文字起こし完了。原音と照合してから案件に反映してください。',{exact:true}).waitFor();
+if(await page.evaluate(()=>store.getState().cases[0].recordings[0].transcript)!=='テスト文字起こし')throw Error('transcript not saved');
+if(jobPosts!==2)throw Error('retry job count');
+console.log({explicitTranscriptionStart:true,processingSpinner:true,cancelAndRetry:true,transcriptSaved:true});
+
 await page.evaluate(async()=>{const before=(await backup.getBackupConfig()).last;store.lock();await backup.runBackup(true);if((await backup.getBackupConfig()).last!==before)throw Error('locked run');});
 console.log({dismissButton:true,sameWarningStaysDismissed:true,remountDismissal:true,detailsRemain:true,newErrorShown:true,lockedSkip:true});
 }finally{if(browser)await browser.close();server.kill();for(const f of[entry,html])fs.unlinkSync(f);}})().catch(e=>{console.error(e);process.exitCode=1});

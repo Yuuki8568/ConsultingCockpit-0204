@@ -67,6 +67,10 @@ export function CaseRecordings() {
   const [connected, setConnected] = useState(false);
   const [localStatus, setLocalStatus] = useState("");
   const recognitionAbort = useRef<AbortController | null>(null);
+  const [recognizing, setRecognizing] = useState<string | null>(null);
+  const mediaFiles = useRef(new Map<string, File>());
+  const [sourceFor, setSourceFor] = useState<string | null>(null);
+  const sourceRef = useRef<HTMLInputElement>(null);
   const [over, setOver] = useState(false);
   const [importing, setImporting] = useState<{ name: string; pct: number } | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
@@ -82,7 +86,7 @@ export function CaseRecordings() {
     alive.current = true;
     return () => { alive.current = false; stopImport.current = true; recognitionAbort.current?.abort(); };
   }, [c?.id, phase]);
-  useEffect(() => { setConnected(false); setConnectionKey(""); setLocalStatus(""); }, [c?.id, phase]);
+  useEffect(() => { setConnected(false); setConnectionKey(""); setLocalStatus(""); setRecognizing(null); setSourceFor(null); mediaFiles.current.clear(); }, [c?.id, phase]);
   const importingRef = useRef(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const urlsRef = useRef<string[]>([]);
@@ -156,18 +160,9 @@ export function CaseRecordings() {
         });
         try { if (!sourceOnly) await archiveOriginal(meta, f); }
         catch (error) { setImportError(`録音は登録済みですが原本バックアップ未完了：${error instanceof Error ? error.message : String(error)}。設定から原本を再選択してください。`); }
-        if (connected) {
-          // The media is already registered. A recognition failure must not delete its stored blob.
-          const controller = new AbortController();
-          recognitionAbort.current = controller;
-          try {
-            const result = await transcribeLocal(f, connectionKey, controller.signal, setLocalStatus);
-            if (!alive.current || stopImport.current || current.current.id !== caseId || current.current.phase !== "unlocked") break;
-            await patch((x) => applyLocalTranscript(x, id, result));
-            setLocalStatus("精密文字起こしを保存しました。原音と照合してから案件に反映してください。");
-          } catch (error) {
-            if (alive.current && current.current.id === caseId) setImportError(`録音は登録済みです。文字起こし: ${controller.signal.aborted ? "中止しました" : error instanceof Error ? error.message : "失敗しました"}。補助ツールの保存結果を手動で取り込むこともできます。`);
-          } finally { recognitionAbort.current = null; }
+        if (alive.current && current.current.id === caseId && current.current.phase === "unlocked") {
+          mediaFiles.current.set(id, f);
+          setLocalStatus("ファイルを読み込みました。下の一覧から「文字起こしを開始」を押してください。");
         }
 
       } catch (e) {
@@ -179,6 +174,40 @@ export function CaseRecordings() {
     }
     importingRef.current = false;
     setImporting(null);
+  }
+
+  async function startTranscription(r: RecordingMeta) {
+    if (importingRef.current || !connected || r.transcript || r.transcriptReview) return;
+    if (r.sourceOnly && !mediaFiles.current.has(r.id)) {
+      setSourceFor(r.id);
+      sourceRef.current?.click();
+      return;
+    }
+    importingRef.current = true;
+    const caseId = current.current.id;
+    const controller = new AbortController();
+    recognitionAbort.current = controller;
+    const active = () => alive.current && !controller.signal.aborted && current.current.id === caseId && current.current.phase === "unlocked";
+    setRecognizing(r.id);
+    setImportError(null);
+    setLocalStatus("文字起こしの準備中…");
+    try {
+      const file = mediaFiles.current.get(r.id) ?? new File([await readMediaBlob(r.id, r.mimeType)], r.name, { type: r.mimeType });
+      if (!active()) return;
+      const result = await transcribeLocal(file, connectionKey.trim(), controller.signal, message => { if (active()) setLocalStatus(message); });
+      if (!active()) return;
+      await patch(x => applyLocalTranscript(x, r.id, result));
+      if (active()) setLocalStatus("文字起こし完了。原音と照合してから案件に反映してください。");
+    } catch (error) {
+      if (alive.current && current.current.id === caseId && current.current.phase === "unlocked") {
+        setLocalStatus(controller.signal.aborted ? "文字起こしを中止しました。再度開始できます。" : "文字起こしに失敗しました。接続を確認して再試行してください。");
+        if (!controller.signal.aborted) setImportError(error instanceof Error ? error.message : "文字起こしに失敗しました。");
+      }
+    } finally {
+      if (recognitionAbort.current === controller) recognitionAbort.current = null;
+      importingRef.current = false;
+      if (alive.current && current.current.id === caseId) setRecognizing(null);
+    }
   }
 
   async function openPlayer(r: RecordingMeta) {
@@ -254,22 +283,28 @@ export function CaseRecordings() {
       </Note>
 
       <div className="mt-3 space-y-2 rounded-sm border border-line p-3">
-        <p className="text-sm">精密モードで自動文字起こし</p>
+        <p className="text-sm">精密モードで文字起こし</p>
         <p className="text-xs text-paper-faint">初回は <a className="underline" href="/downloads/Cockpit-Local-Transcriber-Intel-Mac.zip" download>Mac用補助ツール</a> を展開して Setup.command を実行します。利用時は Connect-Cockpit.command を開き、表示された接続キーを貼り付けてください。</p>
-        <input aria-label="端末内の接続キー" placeholder="接続キーを入力してください" type="password" autoComplete="off" value={connectionKey} disabled={connected || !!importing} onChange={e => setConnectionKey(e.target.value)} className="w-full rounded border border-line bg-ink-850 p-2 placeholder:text-paper-faint" />
-        <button type="button" disabled={!connectionKey.trim() || !!importing} onClick={async () => {
+        <input aria-label="端末内の接続キー" placeholder="接続キーを入力してください" type="password" autoComplete="off" value={connectionKey} disabled={connected || !!importing || !!recognizing} onChange={e => setConnectionKey(e.target.value)} className="w-full rounded border border-line bg-ink-850 p-2 placeholder:text-paper-faint" />
+        <button type="button" disabled={!connectionKey.trim() || !!importing || !!recognizing} onClick={async () => {
           if (connected) { setConnected(false); setConnectionKey(""); setLocalStatus(""); return; }
           const controller = new AbortController(); recognitionAbort.current = controller;
-          try { await connectLocal(connectionKey.trim(), controller.signal); if (!controller.signal.aborted) { setConnectionKey(connectionKey.trim()); setConnected(true); setLocalStatus("接続済み。ファイルを入れると自動で精密文字起こしを開始します。"); } }
+          try { await connectLocal(connectionKey.trim(), controller.signal); if (!controller.signal.aborted) { setConnectionKey(connectionKey.trim()); setConnected(true); setLocalStatus("接続済み。ファイルを読み込み、一覧の「文字起こしを開始」を押してください。"); } }
           catch { if (!controller.signal.aborted) setLocalStatus("接続できません。補助ツールの起動・接続キー・ブラウザーのローカル接続許可を確認してください。"); }
           finally { recognitionAbort.current = null; }
         }}>{connected ? "接続を解除" : "端末内ツールに接続"}</button>
         <p className="text-xs text-paper-faint">動画 → 音声WAVの作成 → 精密文字起こし。音声ファイルは抽出工程を省いて認識します。発言は短縮しません。接続キーは保存・同期しません。ブラウザーにローカル接続の許可が表示されたら許可してください。</p>
         <p className="text-xs text-paper-faint">補助ツールの結果・抽出WAVはMacの Documents/CockpitTranscripts に保存されます。接続しない場合は録音の登録と確認済みJSONの手動取り込みを利用できます。</p>
         {localStatus && <p role="status" className="text-sm">{localStatus}</p>}
-        {importing && connected && <button type="button" onClick={() => { stopImport.current = true; recognitionAbort.current?.abort(); }}>文字起こしを中止</button>}
+        {recognizing && <button className="btn btn-sm" type="button" onClick={() => recognitionAbort.current?.abort()}>文字起こしを中止</button>}
       </div>
       <p className="mt-2 text-xs text-paper-faint">音声・動画は外部へ送信しません。文字起こし結果は案件データとして暗号化して保存・同期します。原本は別途保管してください。</p>
+      {(importing || recognizing) && (
+        <div role="status" aria-live="polite" className="mt-3 flex items-center gap-3 rounded border border-brand bg-brand-soft p-3">
+          <span aria-hidden="true" className="inline-block h-6 w-6 shrink-0 animate-spin rounded-full border-[3px] border-brand border-t-transparent motion-reduce:animate-none" />
+          <span className="text-sm">{recognizing ? localStatus : `ファイル読み込み中：${importing?.name}（${importing?.pct}%）`}</span>
+        </div>
+      )}
       {/* 取り込みゾーン */}
       <div
         className={`mt-3 rounded-sm border border-dashed px-4 py-6 text-center transition-colors ${
@@ -289,7 +324,7 @@ export function CaseRecordings() {
         <input
           ref={inputRef}
           type="file"
-          disabled={!!importing}
+          disabled={!!importing || !!recognizing}
           accept={MEDIA_ACCEPT}
           multiple
           className="hidden"
@@ -302,7 +337,7 @@ export function CaseRecordings() {
         <button
           type="button"
           className="btn btn-primary mb-3"
-          disabled={!!importing}
+          disabled={!!importing || !!recognizing}
           onClick={() => inputRef.current?.click()}
         >
           映像・音声ファイルを読み込む
@@ -328,6 +363,20 @@ export function CaseRecordings() {
           <Note tone="alert">{importError}</Note>
         </div>
       )}
+
+      <input ref={sourceRef} type="file" accept={MEDIA_ACCEPT} className="hidden" onChange={async e => {
+        const file = e.target.files?.[0];
+        e.target.value = "";
+        const recording = list.find(r => r.id === sourceFor);
+        setSourceFor(null);
+        if (!file || !recording) return;
+        if (file.name.normalize("NFC") !== recording.name.normalize("NFC") || file.size !== recording.size) {
+          setImportError("登録時と同じ名前・サイズの原本を選択してください。");
+          return;
+        }
+        mediaFiles.current.set(recording.id, file);
+        await startTranscription(recording);
+      }} />
 
       {/* 一覧 */}
       <div className="mt-4 space-y-2.5">
@@ -368,7 +417,11 @@ export function CaseRecordings() {
                 />
               </div>
 
-              <div className="mt-2 flex flex-wrap items-center gap-1.5">
+              <div className="mt-2 flex flex-wrap items-center gap-1.5" aria-busy={recognizing === r.id}>
+                <button type="button" className="btn btn-primary btn-sm" disabled={!connected || !!importing || !!recognizing || !!r.transcript || !!r.transcriptReview} onClick={() => void startTranscription(r)}>
+                  {recognizing === r.id ? "文字起こし処理中…" : r.transcript ? "文字起こし保存済み" : "文字起こしを開始"}
+                </button>
+                {!connected && !r.transcript && <span className="text-xs text-paper-faint">上の接続キー欄で端末内ツールに接続してください。</span>}
                 <button className="btn btn-sm" onClick={() => void openPlayer(r)} disabled={ps.busy || r.sourceOnly}>
                   {ps.busy ? "読み込み中…" : open ? "閉じる" : "再生"}
                 </button>
@@ -385,11 +438,11 @@ export function CaseRecordings() {
                     設問の下書きを作る
                   </button>
                 )}
-                <ConfirmButton
+                {!recognizing && <ConfirmButton
                   label="削除"
                   confirmLabel="本当に削除（端末から消えます）"
                   onConfirm={() => removeRecording(r)}
-                />
+                />}
                 {r.transcript && (
                   <span className="text-[11px] text-paper-faint">
                     文字起こし {r.transcript.length.toLocaleString("ja-JP")} 字
