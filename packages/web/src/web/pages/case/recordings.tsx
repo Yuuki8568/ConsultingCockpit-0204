@@ -256,7 +256,7 @@ export function CaseRecordings() {
       <div className="mt-3 space-y-2 rounded-sm border border-line p-3">
         <p className="text-sm">精密モードで自動文字起こし</p>
         <p className="text-xs text-paper-faint">初回は <a className="underline" href="/downloads/Cockpit-Local-Transcriber-Intel-Mac.zip" download>Mac用補助ツール</a> を展開して Setup.command を実行します。利用時は Connect-Cockpit.command を開き、表示された接続キーを貼り付けてください。</p>
-        <input aria-label="端末内の接続キー" type="password" autoComplete="off" value={connectionKey} disabled={connected || !!importing} onChange={e => setConnectionKey(e.target.value)} className="w-full rounded border border-line bg-ink-850 p-2" />
+        <input aria-label="端末内の接続キー" placeholder="接続キーを入力してください" type="password" autoComplete="off" value={connectionKey} disabled={connected || !!importing} onChange={e => setConnectionKey(e.target.value)} className="w-full rounded border border-line bg-ink-850 p-2 placeholder:text-paper-faint" />
         <button type="button" disabled={!connectionKey.trim() || !!importing} onClick={async () => {
           if (connected) { setConnected(false); setConnectionKey(""); setLocalStatus(""); return; }
           const controller = new AbortController(); recognitionAbort.current = controller;
@@ -285,8 +285,6 @@ export function CaseRecordings() {
           setOver(false);
           void importFiles(Array.from(e.dataTransfer.files));
         }}
-        onClick={() => { if (!importing) inputRef.current?.click(); }}
-        role="button"
       >
         <input
           ref={inputRef}
@@ -301,6 +299,14 @@ export function CaseRecordings() {
             void importFiles(fs);
           }}
         />
+        <button
+          type="button"
+          className="btn btn-primary mb-3"
+          disabled={!!importing}
+          onClick={() => inputRef.current?.click()}
+        >
+          映像・音声ファイルを読み込む
+        </button>
         {importing ? (
           <p className="text-[13px] text-paper">
             取り込み中: {importing.name}（{importing.pct}%）
@@ -310,7 +316,7 @@ export function CaseRecordings() {
           </p>
         ) : (
           <p className="text-[13px] text-paper-dim">
-            ここに映像・音声ファイルをドロップ（またはクリックして選択）
+            上のボタンで選択するか、ここに映像・音声ファイルをドロップ
             <span className="mt-1 block text-[11px] text-paper-faint">
               mp4 / webm / mov / mp3 / m4a / wav など。最大3時間・4GBまで。
             </span>
