@@ -28,6 +28,7 @@ jobs:
       - run: bun run typecheck:security
       - run: bun run test:contracts
       - run: bun run test:security
+      - run: bun run test:d1-migration
       - run: bun run build:web
         env:
           VITE_APPLICATION_ID: ${{ vars.VITE_APPLICATION_ID }}

@@ -1,9 +1,11 @@
+/// <reference path="../../../cloudflare/worker-env.d.ts" />
+/// <reference types="@cloudflare/workers-types" />
 import app from './api';
 import { withDatabase } from './api/database';
 import { secureResponse } from './security-headers';
 import { createRemoteJWKSet, jwtVerify } from 'jose';
 
-interface Env {
+interface Env extends Partial<Pick<Cloudflare.Env, "COCKPIT_MIGRATION_DB">> {
   ASSETS: { fetch(request: Request): Promise<Response> };
   ACCESS_ISSUER: string;
   ACCESS_AUD: string;
@@ -37,7 +39,7 @@ export default {
           const result = await app.fetch(request);
           // Finish the DB-backed response while the request-local connection is still open.
           return new Response(await result.arrayBuffer(), result);
-        }));
+        }, env.COCKPIT_MIGRATION_DB));
       const path = decodeURIComponent(url.pathname);
       if (path.includes('\\') || path.includes('\0') || path.split('/').some(part => part.startsWith('.')))
         return secureResponse(new Response('Not found', { status: 404 }));
