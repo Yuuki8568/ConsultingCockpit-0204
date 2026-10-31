@@ -1,3 +1,4 @@
+import type { D1Database } from "@cloudflare/workers-types";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createClient } from "@libsql/client";
 import { drizzle } from "drizzle-orm/libsql";
@@ -8,7 +9,7 @@ function createDatabase() {
   return { client, db: drizzle(client, { schema }) };
 }
 type Database = ReturnType<typeof createDatabase>["db"];
-export const databaseContext = new AsyncLocalStorage<{ db: Database; auth?: unknown }>();
+export const databaseContext = new AsyncLocalStorage<{ db: Database; auth?: unknown; migrationDb?: D1Database }>();
 let localDatabase: ReturnType<typeof createDatabase> | undefined;
 export const db = new Proxy({} as Database, {
   get(_target, property) {
@@ -17,8 +18,8 @@ export const db = new Proxy({} as Database, {
     return typeof value === "function" ? value.bind(current) : value;
   },
 });
-export async function withDatabase<T>(run: () => Promise<T>): Promise<T> {
+export async function withDatabase<T>(run: () => Promise<T>, migrationDb?: D1Database): Promise<T> {
   const database = createDatabase();
-  try { return await databaseContext.run({ db: database.db }, run); }
+  try { return await databaseContext.run({ db: database.db, migrationDb }, run); }
   finally { database.client.close(); }
 }

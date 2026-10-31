@@ -17,6 +17,7 @@
   "env": {
     "staging": {
       "name": "consulting-cockpit-staging",
+      "d1_databases": [{"binding": "COCKPIT_MIGRATION_DB", "database_name": "consulting-cockpit-db", "database_id": "be004feb-0f63-4d9d-b0eb-1c275949081c"}],
       "observability": { "enabled": true, "head_sampling_rate": 1 },
       "vars": { "NODE_ENV": "production", "DEPLOYMENT_TARGET": "cloudflare" }
     },
