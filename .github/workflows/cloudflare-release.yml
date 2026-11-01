@@ -26,6 +26,8 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run typecheck:security
       - run: bun run test:contracts
+      - run: bun run test:hardening
+      - run: bun run test:audit-witness
       - run: bun run test:security
       - run: bun run test:cloudflare
       - run: python -m unittest discover -s security-ops -p 'test_migration.py'

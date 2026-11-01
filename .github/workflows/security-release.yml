@@ -27,6 +27,9 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run typecheck:security
       - run: bun run test:contracts
+      - run: bun test security-ops/hardening-maintenance.test.ts
+      - run: bun run test:hardening
+      - run: bun run test:audit-witness
       - run: bun run test:security
       - run: bun run build:web
         env:
@@ -82,3 +85,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: bash security-ops/deploy-release.sh rollback
+  hardening-connection-preflight:
+    if: github.event_name == 'pull_request' && github.head_ref == 'fix/security-hardening-20261101'
+    runs-on: ubuntu-latest
+    environment: cloudflare-staging
+    steps:
+      - name: Check existing protected database configuration without revealing credentials
+        env:
+          COCKPIT_CONFIGURATION: ${{ secrets.CLOUDFLARE_RUNTIME_SECRETS }}
+        run: |
+          node <<'NODE'
+          let config;
+          try { config=JSON.parse(process.env.COCKPIT_CONFIGURATION||'{}'); }
+          catch { console.log('PRECHECK: deployment configuration is not valid JSON'); process.exit(0); }
+          const hasDatabase=typeof config.DATABASE_URL==='string'&&config.DATABASE_URL.startsWith('libsql://');
+          const hasToken=typeof config.DATABASE_AUTH_TOKEN==='string'&&config.DATABASE_AUTH_TOKEN.length>0;
+          const correctSite=config.WEBSITE_URL==='https://cockpit.yamashirogyomukaizen.com';
+          console.log(JSON.stringify({databaseConfigured:hasDatabase,tokenConfigured:hasToken,correctSite,ready:hasDatabase&&hasToken&&correctSite}));
+          NODE

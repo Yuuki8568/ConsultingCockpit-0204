@@ -1,3 +1,6 @@
+import { PasskeyPanel } from "./passkey-panel";
+import { authorize } from "../lib/step-up";
+import { rewrapWriteKey } from "../lib/write-signing";
 /** 設定 — 受託者プロフィール／書類雛形／文面ライブラリ／紹介／保全／端末／監査／取込 */
 import { useEffect, useRef, useState } from "react";
 import { useVault } from "../hooks/use-vault";
@@ -545,7 +548,7 @@ function SecurityTab() {
                       <button
                         className="btn btn-sm"
                         onClick={async () => {
-                          await client.devices.unrevoke({ id: d.id });
+                          await client.devices.unrevoke({id:d.id,authorization:await authorize("device:unrevoke",{id:d.id})});
                           void load();
                         }}
                       >
@@ -556,7 +559,7 @@ function SecurityTab() {
                         label="失効"
                         confirmLabel="失効させる"
                         onConfirm={async () => {
-                          await client.devices.revoke({ id: d.id });
+                          await client.devices.revoke({id:d.id,authorization:await authorize("device:revoke",{id:d.id})});
                           void load();
                         }}
                       />
@@ -591,13 +594,13 @@ function SecurityTab() {
       >
         <p className="mb-3 text-[12px] leading-relaxed text-paper-dim">
           1件ごとに直前の記録のハッシュを含めているため、途中を書き換えたり抜いたりすると
-          つながりが合わなくなります。対象企業名などの詳細は暗号化して保存しています。
+          つながりが合わなくなります。5分ごとに別の保存先へ末尾を記録します。直近の未記録部分の削除や、両方の保存先が改変された場合まで検出を保証するものではありません。対象企業名などの詳細は暗号化して保存しています。
         </p>
         {chain && (
           <Note tone={chain.ok ? "ok" : "alert"}>
             {chain.ok
-              ? `${chain.checked} 件すべてつながっています。書き換えや欠落は見つかりませんでした。`
-              : `つながりが切れています：${chain.reason}`}
+              ? `${chain.checked} 件の連鎖と、独立保存済みの地点が一致しました。`
+              : `検査未完了または不一致：${chain.reason}`}
           </Note>
         )}
 
@@ -716,6 +719,7 @@ function RekeyModal({ open, onClose }: { open: boolean; onClose: () => void }) {
       // レコードと録画を新しい鍵で封じ直す（録画は仮チャンクとして置く）
       prepared = await vaultStore.prepareReencrypt(newKeys.vaultKey, newKeys.macKey);
       const request = {
+        writeKey: await rewrapWriteKey(oldKeys.vaultKey,newKeys.vaultKey),
         expectedGeneration: prepared.generation,
         kdfSalt: salt,
         kdfIterations: SEC_CONFIG.KDF_ITERATIONS,
@@ -724,7 +728,7 @@ function RekeyModal({ open, onClose }: { open: boolean; onClose: () => void }) {
         records: prepared.records,
       };
       await vaultStore.saveRekeyRequest(request);
-      const res = await client.vault.rekey(request, { signal: AbortSignal.timeout(15000) });
+      const res = await client.vault.rekey({...request,authorization:await authorize("vault:rekey",request)}, { signal: AbortSignal.timeout(15000) });
       await vaultStore.commitReencrypt(newKeys.vaultKey, newKeys.macKey, prepared);
       vaultStore.setBackupKdf(salt, SEC_CONFIG.KDF_ITERATIONS);
       prepared = null;
@@ -976,7 +980,7 @@ function DataTab() {
         )}
       </Panel>
 
-      <AutomaticBackupSettings />
+      <PasskeyPanel /><AutomaticBackupSettings />
       <DesktopBackup />
 
       <Panel
@@ -1022,7 +1026,7 @@ function DataTab() {
         />
       </Panel>
 
-      <Panel title="すべて消す" note="預けてある分も、操作の記録も、端末の登録もすべて消します。">
+      <Panel title="すべて消す" note="業務データと暗号文の過去世代を消去します。不正防止用の監査記録・制限回数・端末失効情報・パスキーは保持します。">
         <Note tone="alert">
           この操作は戻せません。案件 {state.cases.length} 件・リード {state.leads.length}{" "}
           件と、すべての書類・記録が消えます。金庫そのものも作り直しになります。
@@ -1032,7 +1036,7 @@ function DataTab() {
             label="すべて消す"
             confirmLabel="本当にすべて消す（戻せません）"
             onConfirm={async () => {
-              await client.vault.eraseAll({ confirm: "ERASE" });
+              await client.vault.eraseAll({confirm:"ERASE",authorization:await authorize("vault:erase",{confirm:"ERASE"})});
               await vaultStore.wipeLocal();
               location.reload();
             }}

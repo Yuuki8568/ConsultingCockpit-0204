@@ -3,26 +3,60 @@
   "name": "consulting-cockpit-migration",
   "main": "packages/web/src/worker.ts",
   "compatibility_date": "2026-10-17",
-  "compatibility_flags": ["nodejs_compat", "nodejs_compat_populate_process_env"],
+  "compatibility_flags": [
+    "nodejs_compat",
+    "nodejs_compat_populate_process_env"
+  ],
   "workers_dev": false,
   "preview_urls": false,
-  "alias": { "@libsql/client": "@libsql/client/web" },
+  "alias": {
+    "@libsql/client": "@libsql/client/web"
+  },
   "assets": {
     "directory": "packages/web/dist",
     "binding": "ASSETS",
     "run_worker_first": true,
     "not_found_handling": "single-page-application"
   },
-  "observability": { "enabled": false },
+  "observability": {
+    "enabled": false
+  },
   "env": {
     "staging": {
       "name": "consulting-cockpit-staging",
-      "observability": { "enabled": true, "head_sampling_rate": 1 },
-      "vars": { "NODE_ENV": "production", "DEPLOYMENT_TARGET": "cloudflare" }
+      "observability": {
+        "enabled": true,
+        "head_sampling_rate": 1
+      },
+      "vars": {
+        "NODE_ENV": "production",
+        "DEPLOYMENT_TARGET": "cloudflare",
+        "COCKPIT_READ_ONLY": "1"
+      },
+      "services": [
+        {
+          "binding": "AUDIT_WITNESS",
+          "service": "consulting-cockpit-audit-witness"
+        }
+      ],
+      "triggers": {
+        "crons": [
+          "*/5 * * * *"
+        ]
+      },
+      "assets": {
+        "directory": "packages/web/dist",
+        "binding": "ASSETS",
+        "run_worker_first": true,
+        "not_found_handling": "single-page-application"
+      }
     },
     "production": {
       "name": "consulting-cockpit-production",
-      "vars": { "NODE_ENV": "production", "DEPLOYMENT_TARGET": "cloudflare" }
+      "vars": {
+        "NODE_ENV": "production",
+        "DEPLOYMENT_TARGET": "cloudflare"
+      }
     }
   }
 }

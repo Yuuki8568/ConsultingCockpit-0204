@@ -1,3 +1,7 @@
+import { witnessHead } from "../security/witness";
+import { appendAudit,auditHash } from "../security/audit";
+import { consumeLimit } from "../security/controls";
+import { ciphertextInput,ivInput } from "../security/inputs";
 import { ORPCError } from "@orpc/server";
 import { asc, desc, eq, sql } from "drizzle-orm";
 import { z } from "zod";
@@ -12,25 +16,8 @@ import { authed } from "../middleware/auth";
  * ------------------------------------------------------------------
  * 各エントリは hash = SHA256(seq + action + atMs + payloadCiphertext + prevHash)。
  * 1件でも書き換えたり抜いたりすると以降の連鎖が合わなくなる。
- * hash はクライアント側で計算して送る（サーバーも同じ式で検証する）。
+ * v2は利用者・端末・IVを含め、時刻とハッシュをサーバーが確定する。
  */
-
-async function sha256Hex(text: string): Promise<string> {
-  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
-  return Array.from(new Uint8Array(buf))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-}
-
-function chainInput(e: {
-  seq: number;
-  action: string;
-  atMs: number;
-  payloadCiphertext: string | null;
-  prevHash: string;
-}): string {
-  return `${e.seq}|${e.action}|${e.atMs}|${e.payloadCiphertext ?? ""}|${e.prevHash}`;
-}
 
 export const audit = {
   /** 直前のエントリ（連鎖をつなぐため） */
@@ -50,43 +37,16 @@ export const audit = {
       z.object({
         action: z.string().min(1).max(60),
         atMs: z.number().int(),
-        payloadCiphertext: z.string().max(20000).optional(),
-        payloadIv: z.string().max(64).optional(),
+        payloadCiphertext: ciphertextInput.optional(),
+        payloadIv: ivInput.optional(),
         deviceId: z.string().max(64).optional(),
       }),
     )
     .handler(async ({ context, input }) => {
-      const uid = context.user.id;
-      const [last] = await db
-        .select({ seq: schema.auditEvent.seq, hash: schema.auditEvent.hash })
-        .from(schema.auditEvent)
-        .where(eq(schema.auditEvent.userId, uid))
-        .orderBy(desc(schema.auditEvent.seq))
-        .limit(1);
-      const seq = (last?.seq ?? 0) + 1;
-      const prevHash = last?.hash ?? "GENESIS";
-      const hash = await sha256Hex(
-        chainInput({
-          seq,
-          action: input.action,
-          atMs: input.atMs,
-          payloadCiphertext: input.payloadCiphertext ?? null,
-          prevHash,
-        }),
-      );
-      await db.insert(schema.auditEvent).values({
-        id: crypto.randomUUID(),
-        userId: uid,
-        seq,
-        action: input.action,
-        atMs: input.atMs,
-        deviceId: input.deviceId ?? null,
-        payloadCiphertext: input.payloadCiphertext ?? null,
-        payloadIv: input.payloadIv ?? null,
-        prevHash,
-        hash,
-      });
-      return { seq, hash };
+      if(Boolean(input.payloadCiphertext)!==Boolean(input.payloadIv))throw new ORPCError("BAD_REQUEST");
+      const allowed=await db.transaction(tx=>consumeLimit(tx,`audit:${context.user.id}`,1,60,60000));
+      if(!allowed)throw new ORPCError("TOO_MANY_REQUESTS");
+      return db.transaction(tx=>appendAudit(tx,context.user.id,context.deviceId,`client:${input.action}`,input.payloadCiphertext??null,input.payloadIv??null));
     }),
 
   list: authed
@@ -122,14 +82,14 @@ export const audit = {
       .where(eq(schema.auditEvent.userId, context.user.id))
       .orderBy(asc(schema.auditEvent.seq));
     if (rows.length === 0) {
-      return { ok: true as const, checked: 0, headHash: "GENESIS", startsAtSeq: 0 };
+      return { ok: false as const, checked: 0, reason:"独立保存先との照合が未完了です", startsAtSeq: 0 };
     }
     // 先頭を切り詰めた（truncateOldest）場合、残っている最小の通し番号から始まる。
     // そのため 1 からではなく、実際に残っている先頭を起点にして数える。
     // 起点より前は残っていないので、そこから先の連なりだけを確かめる。
     const startsAtSeq = rows[0]!.seq;
-    let prevHash = rows[0]!.prevHash;
-    let expectedSeq = startsAtSeq;
+    let prevHash = "GENESIS";
+    let expectedSeq = 1;
     for (const r of rows) {
       if (r.seq !== expectedSeq) {
         return {
@@ -149,15 +109,7 @@ export const audit = {
           startsAtSeq,
         };
       }
-      const h = await sha256Hex(
-        chainInput({
-          seq: r.seq,
-          action: r.action,
-          atMs: r.atMs,
-          payloadCiphertext: r.payloadCiphertext,
-          prevHash: r.prevHash,
-        }),
-      );
+      const h = await auditHash(r);
       if (h !== r.hash) {
         return {
           ok: false as const,
@@ -170,7 +122,15 @@ export const audit = {
       prevHash = r.hash;
       expectedSeq++;
     }
-    return { ok: true as const, checked: rows.length, headHash: prevHash, startsAtSeq };
+    const [head]=await db.select().from(schema.auditHead).where(eq(schema.auditHead.userId,context.user.id));
+    if(head?.seq!==rows[rows.length-1]!.seq||head?.hash!==prevHash)return {ok:false as const,checked:rows.length,startsAtSeq,reason:"末尾が管理記録と一致しません"};
+    try {
+      const witness=await witnessHead(context.user.id);
+      if(witness.seq===0)return {ok:false as const,checked:rows.length,startsAtSeq,reason:"独立保存先への初回記録を待っています"};
+      const anchored=rows.find(r=>r.seq===witness.seq);
+      if(!anchored||anchored.hash!==witness.hash)return {ok:false as const,checked:rows.length,startsAtSeq,reason:"独立保存先と一致しません（末尾削除・改変の可能性）"};
+      return {ok:true as const,checked:rows.length,startsAtSeq,headHash:prevHash,witnessSeq:witness.seq};
+    } catch {return {ok:false as const,checked:rows.length,startsAtSeq,reason:"独立保存先に接続できず検査未完了です"};}
   }),
 
   /**
@@ -179,25 +139,5 @@ export const audit = {
    */
   truncateOldest: authed
     .input(z.object({ keepLatest: z.number().int().min(100).max(100000) }))
-    .handler(async ({ context, input }) => {
-      const uid = context.user.id;
-      const [r] = await db
-        .select({ n: sql<number>`count(*)` })
-        .from(schema.auditEvent)
-        .where(eq(schema.auditEvent.userId, uid));
-      const total = Number(r?.n ?? 0);
-      if (total <= input.keepLatest) return { deleted: 0 };
-      const toDelete = total - input.keepLatest;
-      const olds = await db
-        .select({ id: schema.auditEvent.id })
-        .from(schema.auditEvent)
-        .where(eq(schema.auditEvent.userId, uid))
-        .orderBy(asc(schema.auditEvent.seq))
-        .limit(toDelete);
-      if (olds.length === 0) throw new ORPCError("BAD_REQUEST");
-      await db.batch(
-        olds.map((o) => db.delete(schema.auditEvent).where(eq(schema.auditEvent.id, o.id))) as never,
-      );
-      return { deleted: olds.length };
-    }),
+    .handler(async ():Promise<{deleted:number}>=>{throw new ORPCError("FORBIDDEN",{message:"監査証跡の保護のため履歴の切り詰めは停止しています"});}),
 };

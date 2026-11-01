@@ -32,7 +32,9 @@
     "test:cloudflare": "cd packages/web && bun test tests/cloudflare.test.ts",
     "test:contracts": "bun test tests/*.test.ts",
     "test:contract-ui": "bun tests/contract-actions.browser.ts",
-    "test:automatic-backup": "cd packages/web && node scripts/test-automatic-backup.cjs"
+    "test:automatic-backup": "cd packages/web && node scripts/test-automatic-backup.cjs",
+    "test:hardening": "cd packages/web && bun test tests/hardening-core.test.ts",
+    "test:audit-witness": "node tests/audit-witness.cjs"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261016.1",
