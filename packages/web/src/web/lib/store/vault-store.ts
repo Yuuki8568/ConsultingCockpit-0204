@@ -1,3 +1,5 @@
+import { setupWriteSigning,signSync } from "../write-signing";
+import { authorize } from "../step-up";
 /**
  * 金庫ストア。アプリの状態はすべてここを通る。
  *
@@ -575,6 +577,8 @@ export class VaultStore {
    * その編集を巻き込んで消してしまう。通信の前後で revision / キューの
    * 変化を見て、編集が挟まっていたら取り込みを次回に回す。
    */
+  async enableWriteSigning(){if(!this.key)throw new Error("金庫を解錠してください");await setupWriteSigning(this.key,this.generation);this.scheduleSync(100);}
+
   private async syncCritical(): Promise<void> {
     const key = this.key;
     const epoch = this.epoch;
@@ -591,17 +595,24 @@ export class VaultStore {
       const allDirty = await idb.dirtyRecords();
       const oversized = allDirty.filter((r) => r.ciphertext.length > MAX_SYNC_CIPHERTEXT);
       const sendable = allDirty.filter((r) => r.ciphertext.length <= MAX_SYNC_CIPHERTEXT);
-      const dirty = sendable.slice(0, MAX_SYNC_RECORDS);
+      const dirty: LocalRecord[]=[];
+      let bytes=0;
+      for(const row of sendable.slice(0,MAX_SYNC_RECORDS)){
+        const size=new TextEncoder().encode(JSON.stringify(row)).byteLength;
+        if(bytes+size>3*1024*1024)break;
+        dirty.push(row);bytes+=size;
+      }
       const moreDirty = sendable.length > dirty.length;
       const since = (await idb.getMeta<number>(META_CURSOR)) ?? 0;
       const deviceId = deviceIdFor();
 
       this.assertSession(epoch);
-      const res = await client.sync.push({
+      const request = {
         generation: this.generation,
         deviceId,
         since,
         records: dirty.map((r) => ({
+          operation: (r.deleted ? "delete" : "put") as "delete"|"put",
           id: r.id,
           type: r.type as "case" | "lead" | "profile" | "template" | "meta" | "log",
           ciphertext: r.ciphertext,
@@ -611,7 +622,10 @@ export class VaultStore {
           // この編集が元にしたサーバー版。これが一致していれば競合扱いにしない。
           baseSeq: r.seq,
         })),
-      }, { signal: AbortSignal.timeout(15000) });
+      };
+      const proof=dirty.length?await signSync(key,request):undefined;
+      this.assertSession(epoch);
+      const res=await client.sync.push({...request,proof},{signal:AbortSignal.timeout(15000)});
 
       this.assertSession(epoch);
       // 送信できたものは dirty を落とす
@@ -1003,7 +1017,7 @@ export class VaultStore {
     try { await open(this.key, journal.marker, "cc4-rekey-journal"); }
     catch {
       if (journal.request && this.generation === journal.generation) {
-        await client.vault.rekey(journal.request, { signal: AbortSignal.timeout(15000) });
+        await client.vault.rekey({...journal.request,authorization:await authorize("vault:rekey",journal.request)}, { signal: AbortSignal.timeout(15000) });
       }
       throw new Error("未完了の鍵変更を再送しました。変更先の新パスフレーズで再解錠してください。旧原本と復旧情報は保持されています");
     }

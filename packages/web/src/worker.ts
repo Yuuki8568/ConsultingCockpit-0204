@@ -1,16 +1,19 @@
+/// <reference types="@cloudflare/workers-types" />
+/// <reference path="../../../cloudflare/security-env.d.ts" />
+import { publishWitnesses } from "./api/security/witness";
 import app from './api';
 import { withDatabase } from './api/database';
 import { secureResponse } from './security-headers';
 import { createRemoteJWKSet, jwtVerify } from 'jose';
 
-interface Env {
-  ASSETS: { fetch(request: Request): Promise<Response> };
+interface Env extends SecurityEnv {
   ACCESS_ISSUER: string;
   ACCESS_AUD: string;
 }
 // Cache only public verification keys. Never share DB connections or auth state between requests.
 const keysets = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
 export default {
+  async scheduled(_controller:ScheduledController,env:Env):Promise<void>{await withDatabase(publishWitnesses,env.AUDIT_WITNESS);},
   async fetch(request: Request, env: Env): Promise<Response> {
     const required = ['WEBSITE_URL', 'OWNER_EMAILS', 'DATABASE_URL', 'DATABASE_AUTH_TOKEN',
       'BETTER_AUTH_SECRET', 'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET'];
@@ -32,12 +35,16 @@ export default {
       await jwtVerify(assertion, keys, { issuer: issuer.origin, audience: env.ACCESS_AUD, algorithms: ['RS256'] });
     } catch { return secureResponse(new Response('Access denied', { status: 403 })); }
     try {
+      if(process.env.COCKPIT_READ_ONLY==='1'&&url.pathname.startsWith('/api/rpc/')) {
+        const allowed=new Set(['ping','vault/status','vault/unlockParams','devices/list','devices/loginHistory','audit/head','audit/list','audit/count','audit/verifyChain','sync/stats','sync/pullAll','passkeys/list','passkeys/registrationOptions','passkeys/register','passkeys/authenticationOptions','passkeys/authenticate','devices/register','writeKeys/current','writeKeys/register']);
+        if(!allowed.has(url.pathname.slice('/api/rpc/'.length)))return secureResponse(Response.json({error:'メンテナンス中のため業務データの変更は停止しています'},{status:503}));
+      }
       if (url.pathname === '/api' || url.pathname.startsWith('/api/'))
         return secureResponse(await withDatabase(async () => {
           const result = await app.fetch(request);
           // Finish the DB-backed response while the request-local connection is still open.
           return new Response(await result.arrayBuffer(), result);
-        }));
+        },env.AUDIT_WITNESS));
       const path = decodeURIComponent(url.pathname);
       if (path.includes('\\') || path.includes('\0') || path.split('/').some(part => part.startsWith('.')))
         return secureResponse(new Response('Not found', { status: 404 }));

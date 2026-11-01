@@ -114,6 +114,7 @@ export const auditEvent = sqliteTable(
     /** 直前エントリのハッシュ。連鎖が切れていれば改ざんと判定できる。 */
     prevHash: text("prev_hash").notNull(),
     hash: text("hash").notNull(),
+    hashVersion:integer("hash_version").notNull().default(1),
   },
   (t) => [
     uniqueIndex("audit_user_seq_uidx").on(t.userId, t.seq),
@@ -166,3 +167,11 @@ export const stepUpTicket = sqliteTable("step_up_ticket", {
   id: text("id").primaryKey(), userId: text("user_id").notNull(), sessionId: text("session_id").notNull(),
   action: text("action").notNull(), payloadHash: text("payload_hash").notNull(), expiresAtMs: integer("expires_at_ms").notNull(),
 });
+export const deviceSession = sqliteTable("device_session", {
+ sessionId: text("session_id").primaryKey(),userId:text("user_id").notNull(),deviceId:text("device_id").notNull(),createdAtMs:integer("created_at_ms").notNull(),
+});
+export const writeIdentity = sqliteTable("write_identity", {
+ userId:text("user_id").primaryKey(),publicKey:text("public_key").notNull(),privateCiphertext:text("private_ciphertext").notNull(),privateIv:text("private_iv").notNull(),generation:integer("generation").notNull(),version:integer("version").notNull(),
+});
+
+export const auditHead=sqliteTable("audit_head",{userId:text("user_id").primaryKey(),seq:integer("seq").notNull(),hash:text("hash").notNull()});

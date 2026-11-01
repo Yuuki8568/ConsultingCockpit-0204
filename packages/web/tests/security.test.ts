@@ -7,6 +7,9 @@ import { makeEmptyVaultState, assertUniqueImportIds } from '../src/web/domain/lo
 import { sanitizeSheetCell, encodeCsv } from '../src/web/lib/export/xlsx';
 let push: (...args: any[]) => Promise<any> = async () => { throw new Error('offline fixture'); };
 mock.module('../src/web/lib/api', () => ({ client: { sync: { push: (...a: any[]) => push(...a) }, vault: { rekey: async () => ({}) } } }));
+// Store-only tests stub signing; cryptographic rejection is tested in hardening-core.
+mock.module('../src/web/lib/write-signing',()=>({signSync:async()=>undefined,setupWriteSigning:async()=>{}}));
+mock.module('../src/web/lib/step-up',()=>({authorize:async()=> 'fixture'}));
 const { VaultStore } = await import('../src/web/lib/store/vault-store');
 let held = false;
 Object.defineProperty(globalThis, 'navigator', { configurable: true, value: {
@@ -161,13 +164,13 @@ test('47 pending rows drain in bounded batches and survive retry and stale pull'
   // Avoid decoding synthetic rows; this test exercises persistence and batching.
   (store as any).rebuildFromLocal = async () => {};
   await store.sync();
-  expect((await idb.dirtyRecords()).length).toBe(27);
+  expect((await idb.dirtyRecords()).length).toBe(39);
   expect((await idb.getRecord(rows[46]!.id))?.ciphertext).toBe('local-46');
   expect(scheduled).toBe(1);
   fail = true; await store.sync();
-  expect((await idb.dirtyRecords()).length).toBe(27);
-  fail = false; await store.sync(); await store.sync();
-  expect(sizes).toEqual([20,20,20,7]);
+  expect((await idb.dirtyRecords()).length).toBe(39);
+  fail = false; for(let i=0;i<5;i++)await store.sync();
+  expect(sizes).toEqual([8,8,8,8,8,8,7]);
   expect((await idb.dirtyRecords()).length).toBe(0);
   for (const row of rows) {
     const saved = await idb.getRecord(row.id);

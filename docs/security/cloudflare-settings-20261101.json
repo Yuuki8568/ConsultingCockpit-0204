@@ -1,0 +1,21 @@
+{
+  "status": "PROPOSED_NOT_APPLIED",
+  "observedWorkerVersion": "2dced962-5d1a-4eb2-9f02-46f6a75f9f02",
+  "access": {
+    "accountId": "57974846053d88d0e7297f0eff0f8644",
+    "applicationId": "8204deac-f962-4a4b-97de-0f1916a00605",
+    "domain": "cockpit.yamashirogyomukaizen.com",
+    "http_only_cookie_attribute": {"before": false, "after": true},
+    "enable_binding_cookie": {"before": false, "after": true, "gate": "Check fresh login, logout and multiple browsers before retaining this setting"},
+    "method": "Read current app, preserve unrelated configuration and policies, update only reviewed cookie fields with Access application PUT, then read back"
+  },
+  "tls": {
+    "zoneId": "d097d9c07e116ff93adabd685b38ce08",
+    "zoneName": "yamashirogyomukaizen.com",
+    "min_tls_version": {"before": "1.0", "after": "1.2"},
+    "scope": "Zone-wide, including other proxied sites in this zone",
+    "hostnameOverrideRead": "404 Resource not found; availability not established",
+    "verification": "TLS 1.0 and 1.1 fail; TLS 1.2 and 1.3 connect; current owner browsers can sign in",
+    "rollback": "Preserve existing setting and review compatibility failure before rollback; do not silently restore weak protocols"
+  }
+}

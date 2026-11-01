@@ -1,3 +1,5 @@
+import { appendAudit } from "../security/audit";
+import { verifyWrite } from "./write-keys";
 import { ciphertextInput, ivInput } from "../security/inputs";
 import { archiveRecords, syncBudget } from "../security/controls";
 import { MAX_SYNC_RECORDS } from "../../shared/sync-limits";
@@ -23,6 +25,7 @@ import { classifySyncError } from "../sync-diagnostics";
  */
 
 const recordInput = z.object({
+  operation:z.enum(["put","delete"]),
   id: z.string().min(1).max(64),
   type: z.enum(["case", "lead", "profile", "template", "meta", "log"]),
   // 1件あたりの上限を置く（1MB ≒ 平文768KB目安）。上限がないと、
@@ -38,8 +41,8 @@ const recordInput = z.object({
    * サーバーの現在の seq と一致していれば「相手の変更を見た上での編集」なので競合ではない。
    * 一致しないときだけ、上書きされる側を競合コピーとして返す。
    */
-  baseSeq: z.number().int().default(0),
-});
+  baseSeq: z.number().int().min(0).default(0),
+}).refine(r=>(r.operation==="delete")===r.deleted,"操作種別と削除状態が一致しません");
 
 async function assertDeviceActive(userId: string, deviceId: string) {
   const [d] = await db
@@ -64,6 +67,7 @@ export const sync = {
   push: authed
     .input(
       z.object({
+        proof:z.object({id:z.string().uuid(),signature:z.string().max(200)}).optional(),
         // 端末IDは必須。省略できると、失効させた端末が「端末IDを付けない」だけで
         // 失効判定を通り抜けてしまうため。
         deviceId: z.string().min(4).max(64),
@@ -76,11 +80,16 @@ export const sync = {
       const uid = context.user.id;
       let stage = "device-check";
       try {
+      if(context.deviceId!==input.deviceId) throw new ORPCError("FORBIDDEN");
       await assertDeviceActive(uid, input.deviceId);
       await syncBudget(uid, input, input.records.length);
 
       stage = "transaction-open";
       return await db.transaction(async tx => {
+      const [bound]=await tx.select().from(schema.deviceSession).where(eq(schema.deviceSession.sessionId,context.session.id));
+      const [active]=await tx.select().from(schema.device).where(and(eq(schema.device.userId,uid),eq(schema.device.id,input.deviceId)));
+      if(bound?.deviceId!==input.deviceId||bound?.userId!==uid||!active||active.revokedAtMs)throw new ORPCError("FORBIDDEN");
+      if(input.records.length)await verifyWrite(tx,uid,context.session.id,input);
       stage = "vault-read";
       const [v] = await tx.select().from(schema.vault).where(eq(schema.vault.userId, uid));
       if (!v) throw new ORPCError("NOT_FOUND", { message: "金庫が未作成です" });
@@ -203,6 +212,7 @@ export const sync = {
         for (const row of saved) acceptedVersions[row.id] = row.seq;
       }
 
+      if(accepted.length)await appendAudit(tx,uid,context.deviceId,"sync:accepted");
       stage = "transaction-commit";
       return {
         generation: v.generation,
@@ -246,6 +256,7 @@ export const sync = {
     )
     .handler(async ({ context, input }) => {
       const uid = context.user.id;
+      if(context.deviceId!==input.deviceId) throw new ORPCError("FORBIDDEN");
       await assertDeviceActive(uid, input.deviceId);
       const rows = await db
         .select()
@@ -295,29 +306,7 @@ export const sync = {
   /** 保持期間ポリシーの適用：論理削除から N 日超えた行を物理削除する */
   purgeDeleted: authed
     .input(z.object({ olderThanDays: z.number().int().min(1).max(3650) }))
-    .handler(async ({ context, input }) => {
-      const cutoff = Date.now() - input.olderThanDays * 86400000;
-      const rows = await db
-        .select({ id: schema.record.id })
-        .from(schema.record)
-        .where(
-          and(
-            eq(schema.record.userId, context.user.id),
-            sql`${schema.record.deletedAt} is not null`,
-            sql`${schema.record.deletedAt} < ${cutoff}`,
-          ),
-        );
-      if (rows.length > 0) {
-        await db.delete(schema.record).where(
-          and(
-            eq(schema.record.userId, context.user.id),
-            inArray(
-              schema.record.id,
-              rows.map((r) => r.id),
-            ),
-          ),
-        );
-      }
-      return { purged: rows.length };
+    .handler(async ():Promise<{purged:number}> => {
+      throw new ORPCError("FORBIDDEN",{message:"暗号文の世代保全中のため、自動完全削除は停止しています"});
     }),
 };

@@ -1,3 +1,6 @@
+import { and, eq } from "drizzle-orm";
+import { db } from "../database";
+import * as schema from "../database/schema";
 import { ORPCError } from "@orpc/server";
 import { base } from "../__core/app";
 import { auth } from "../auth";
@@ -33,7 +36,9 @@ export const authed = base.use(async ({ context, next }) => {
       message: "この操作卓は本人専用です。許可されたアカウントでサインインしてください。",
     });
   }
-  return next({ context: { user: session.user, session: session.session } });
+  const [binding]=await db.select().from(schema.deviceSession).where(and(eq(schema.deviceSession.sessionId,session.session.id),eq(schema.deviceSession.userId,session.user.id)));
+  if(binding) {const [device]=await db.select().from(schema.device).where(and(eq(schema.device.id,binding.deviceId),eq(schema.device.userId,session.user.id)));if(!device||device.revokedAtMs)throw new ORPCError("FORBIDDEN",{message:"この端末は失効しています"});}
+  return next({ context: { user: session.user, session: session.session, deviceId:binding?.deviceId??null } });
 });
 
 export const recentlyAuthed = authed.use(async ({ context, next }) => {
