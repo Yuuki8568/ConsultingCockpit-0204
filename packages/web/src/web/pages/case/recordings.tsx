@@ -289,6 +289,7 @@ export function CaseRecordings() {
             {connected ? "接続済み" : "未接続"}
           </span>
         </div>
+        <p className="text-xs text-paper-dim">Androidでは案件・メモ・文字起こし結果を確認できます。精密文字起こしはMac上で実行してください。スマホからMacの補助ツールへの接続は、この画面では対応していません。録音・動画原本は端末間で自動同期されません。</p>
         <p className="text-xs text-paper-faint">初回は <a className="underline" href="/downloads/Cockpit-Local-Transcriber-Intel-Mac.zip" download>Mac用補助ツール</a> を展開して Setup.command を実行します。利用時は Connect-Cockpit.command を開き、表示された接続キーを貼り付けてください。</p>
         <input aria-label="端末内の接続キー" placeholder="接続キーを入力してください" type="password" autoComplete="off" value={connectionKey} disabled={connected || !!importing || !!recognizing} onChange={e => setConnectionKey(e.target.value)} className="w-full rounded border border-line bg-ink-850 p-2 placeholder:text-paper-faint" />
         <button type="button" className="btn btn-primary" disabled={!connectionKey.trim() || !!importing || !!recognizing} onClick={async () => {

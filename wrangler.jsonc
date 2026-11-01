@@ -31,7 +31,7 @@
       "vars": {
         "NODE_ENV": "production",
         "DEPLOYMENT_TARGET": "cloudflare",
-        "COCKPIT_READ_ONLY": "1"
+        "COCKPIT_READ_ONLY": "0"
       },
       "services": [
         {
