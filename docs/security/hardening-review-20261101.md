@@ -40,3 +40,10 @@ Keep business writes blocked first. Code rollback alone does not undo schema, ke
 ## Remaining storage/contract work
 
 This branch does **not** move the authoritative business database to D1. Existing draft PRs #11/#13 are not safe to merge blindly: transaction conversion, auth-data migration, deletion/rekey lifecycle and candidate-copy cleanup remain separate work. D1 can store ciphertext, but authoritative cutover is not completed by creating a D1 database or copying snapshots. Contract templates must describe the actual service/storage after cutover; do not state that business data is already stored only in Cloudflare and do not rewrite signed contracts.
+
+
+## Approved execution update (2026-11-01 JST)
+
+The owner approved rollout. Access HttpOnly is now enabled; policy IDs were preserved. Minimum TLS was already 1.2 when rechecked. The witness schema and service-only Worker are deployed; both workers.dev and preview URLs are disabled. Binding Cookie is deferred until real-browser compatibility can be checked.
+
+The existing GitHub `cloudflare-staging` environment has no `CLOUDFLARE_RUNTIME_SECRETS`. A metadata-only preflight confirmed this without revealing credentials. Therefore the one-time additive migration will run inside a temporary maintenance Worker using the existing runtime bindings, without exporting any secret. Its scheduled handler executes only the reviewed SQL and writes a completion receipt to the separate witness D1. Requests receive maintenance status while this version is active. The synthetic test confirms preservation of business ciphertext, existing audit hashes, safe retries and rejection of partial schemas. The normal hardening app is deployed only after the receipt confirms success. No HTTP migration endpoint is exposed and arbitrary SQL is never accepted. Cron propagation and the subsequent build may temporarily pause server availability; local unsent data remains on the owner's device.
