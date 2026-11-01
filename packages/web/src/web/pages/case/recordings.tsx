@@ -6,6 +6,7 @@
  *   その内容から ⑤・② の設問の下書きを作るためのプロンプトを生成する
  * - AIの出力を貼り戻すと、空欄の項目にだけ下書きを入れる（判断は人が行う）
  */
+import { archiveOriginal } from "../../lib/backup/automatic";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useCurrentCase } from "../../hooks/use-current";
 import { useVault } from "../../hooks/use-vault";
@@ -35,6 +36,9 @@ import {
   TRANSCRIPT_ACCEPT,
   type AutofillEntry,
 } from "../../domain/logic/recording";
+import { LOCAL_MEDIA_BYTES, validateMedia } from "../../lib/transcription/limits";
+import { parseTranscriptReview, applyTranscriptImport, MAX_REVIEW_BYTES, type TranscriptReview } from "../../lib/transcription/review";
+import { connectLocal, transcribeLocal, applyLocalTranscript } from "../../lib/transcription/bridge";
 import type { CaseRecord, RecordingMeta } from "../../domain/types";
 
 /** 元ファイルから再生時間だけを拾う（本体は暗号化前に読まない） */
@@ -58,7 +62,15 @@ type PlayerState = { url?: string; busy?: boolean; err?: string };
 
 export function CaseRecordings() {
   const { c, patch } = useCurrentCase();
-  const { saveMediaBlob, readMediaBlob, deleteMediaBlob } = useVault();
+  const { phase, saveMediaBlob, readMediaBlob, deleteMediaBlob } = useVault();
+  const [connectionKey, setConnectionKey] = useState("");
+  const [connected, setConnected] = useState(false);
+  const [localStatus, setLocalStatus] = useState("");
+  const recognitionAbort = useRef<AbortController | null>(null);
+  const [recognizing, setRecognizing] = useState<string | null>(null);
+  const mediaFiles = useRef(new Map<string, File>());
+  const [sourceFor, setSourceFor] = useState<string | null>(null);
+  const sourceRef = useRef<HTMLInputElement>(null);
   const [over, setOver] = useState(false);
   const [importing, setImporting] = useState<{ name: string; pct: number } | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
@@ -66,6 +78,16 @@ export function CaseRecordings() {
   const [players, setPlayers] = useState<Record<string, PlayerState>>({});
   const [transcriptFor, setTranscriptFor] = useState<string | null>(null);
   const [autofillFor, setAutofillFor] = useState<string | null>(null);
+  const alive = useRef(true);
+  const stopImport = useRef(false);
+  const current = useRef({ id: c?.id, phase });
+  current.current = { id: c?.id, phase };
+  useEffect(() => {
+    alive.current = true;
+    return () => { alive.current = false; stopImport.current = true; recognitionAbort.current?.abort(); };
+  }, [c?.id, phase]);
+  useEffect(() => { setConnected(false); setConnectionKey(""); setLocalStatus(""); setRecognizing(null); setSourceFor(null); mediaFiles.current.clear(); }, [c?.id, phase]);
+  const importingRef = useRef(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const urlsRef = useRef<string[]>([]);
 
@@ -84,8 +106,13 @@ export function CaseRecordings() {
   };
 
   async function importFiles(files: File[]) {
+    if (importingRef.current) return;
+    importingRef.current = true;
+    const caseId = c?.id;
+    stopImport.current = false;
     setImportError(null);
     for (const f of files) {
+      if (!alive.current || stopImport.current || current.current.id !== caseId || current.current.phase !== "unlocked") break;
       if (!isMediaFile(f.name, f.type)) {
         setImportError(`対応していない形式です: ${f.name}（映像・音声ファイルを入れてください）`);
         continue;
@@ -94,8 +121,11 @@ export function CaseRecordings() {
       const kind = mediaKind(f.name, f.type);
       setImporting({ name: f.name, pct: 0 });
       try {
+        validateMedia(f.size);
         const durationSec = await probeDuration(f, kind);
-        const chunkCount = await saveMediaBlob(id, f, (d, t) =>
+        validateMedia(f.size, durationSec);
+        const sourceOnly = f.size > LOCAL_MEDIA_BYTES;
+        const chunkCount = sourceOnly ? 0 : await saveMediaBlob(id, f, (d, t) =>
           setImporting({ name: f.name, pct: t > 0 ? Math.round((d / t) * 100) : 0 }),
         );
         const meta: RecordingMeta = {
@@ -107,16 +137,34 @@ export function CaseRecordings() {
           addedAt: new Date().toISOString(),
           durationSec,
           chunkCount,
+          sourceOnly,
           note: "",
           consentAt: "",
           transcriptName: "",
           transcript: "",
           transcriptAt: "",
         };
+        if (!alive.current || stopImport.current || current.current.id !== caseId || current.current.phase !== "unlocked") {
+          await deleteMediaBlob(id).catch(() => {});
+          break;
+        }
+        // Large originals have no durable browser copy: don't register them as
+        // imported until the configured archive has been written and verified.
+        if (sourceOnly) {
+          await archiveOriginal(meta, f);
+          if (!alive.current || stopImport.current || current.current.id !== caseId || current.current.phase !== "unlocked") break;
+        }
         await patch((x) => {
           x.recordings = x.recordings ?? [];
           x.recordings.push(meta);
         });
+        try { if (!sourceOnly) await archiveOriginal(meta, f); }
+        catch (error) { setImportError(`録音は登録済みですが原本バックアップ未完了：${error instanceof Error ? error.message : String(error)}。設定から原本を再選択してください。`); }
+        if (alive.current && current.current.id === caseId && current.current.phase === "unlocked") {
+          mediaFiles.current.set(id, f);
+          setLocalStatus("ファイルを読み込みました。下の一覧から「文字起こしを開始」を押してください。");
+        }
+
       } catch (e) {
         await deleteMediaBlob(id).catch(() => {});
         setImportError(
@@ -124,7 +172,42 @@ export function CaseRecordings() {
         );
       }
     }
+    importingRef.current = false;
     setImporting(null);
+  }
+
+  async function startTranscription(r: RecordingMeta) {
+    if (importingRef.current || !connected || r.transcript || r.transcriptReview) return;
+    if (r.sourceOnly && !mediaFiles.current.has(r.id)) {
+      setSourceFor(r.id);
+      sourceRef.current?.click();
+      return;
+    }
+    importingRef.current = true;
+    const caseId = current.current.id;
+    const controller = new AbortController();
+    recognitionAbort.current = controller;
+    const active = () => alive.current && !controller.signal.aborted && current.current.id === caseId && current.current.phase === "unlocked";
+    setRecognizing(r.id);
+    setImportError(null);
+    setLocalStatus("文字起こしの準備中…");
+    try {
+      const file = mediaFiles.current.get(r.id) ?? new File([await readMediaBlob(r.id, r.mimeType)], r.name, { type: r.mimeType });
+      if (!active()) return;
+      const result = await transcribeLocal(file, connectionKey.trim(), controller.signal, message => { if (active()) setLocalStatus(message); });
+      if (!active()) return;
+      await patch(x => applyLocalTranscript(x, r.id, result));
+      if (active()) setLocalStatus("文字起こし完了。原音と照合してから案件に反映してください。");
+    } catch (error) {
+      if (alive.current && current.current.id === caseId && current.current.phase === "unlocked") {
+        setLocalStatus(controller.signal.aborted ? "文字起こしを中止しました。再度開始できます。" : "文字起こしに失敗しました。接続を確認して再試行してください。");
+        if (!controller.signal.aborted) setImportError(error instanceof Error ? error.message : "文字起こしに失敗しました。");
+      }
+    } finally {
+      if (recognitionAbort.current === controller) recognitionAbort.current = null;
+      importingRef.current = false;
+      if (alive.current && current.current.id === caseId) setRecognizing(null);
+    }
   }
 
   async function openPlayer(r: RecordingMeta) {
@@ -193,12 +276,42 @@ export function CaseRecordings() {
   return (
     <Panel
       title="面談の録画・録音"
-      note="Google Meet などの録画・録音をドラッグ&ドロップで取り込みます。ファイルは暗号化してこの端末の中にだけ保存し、サーバーには送りません。文字起こしはアプリの外（Meet の文字起こし機能や自分のAI）で行い、結果を取り込んで設問の下書きに使います。"
+      note="Google Meet などの録画・録音をドラッグ&ドロップで取り込みます。64MB以下の原本は暗号化して端末内に保存します。大容量の原本は保存せず、選択したファイルから直接読みます。音声・動画はサーバーに送りません。端末内補助ツールの精密文字起こしを取り込み、設問の下書きに使えます。動画は音声部分を認識します（声とBGMの分離機能ではありません）。"
     >
       <Note tone="warn">
         録画・録音は事前に相手の同意を得てください。同意を得た日を各ファイルに記録できます。
       </Note>
 
+      <div className="mt-3 space-y-2 rounded-sm border border-line p-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="text-sm">精密モードで文字起こし</p>
+          <span className={`rounded-full border px-2 py-0.5 text-xs font-medium ${connected ? "border-emerald-600 bg-emerald-50 text-emerald-800" : "border-amber-500 bg-amber-50 text-amber-900"}`}>
+            {connected ? "接続済み" : "未接続"}
+          </span>
+        </div>
+        <p className="text-xs text-paper-dim">Androidでは案件・メモ・文字起こし結果を確認できます。精密文字起こしはMac上で実行してください。スマホからMacの補助ツールへの接続は、この画面では対応していません。録音・動画原本は端末間で自動同期されません。</p>
+        <p className="text-xs text-paper-faint">初回は <a className="underline" href="/downloads/Cockpit-Local-Transcriber-Intel-Mac.zip" download>Mac用補助ツール</a> を展開して Setup.command を実行します。利用時は Connect-Cockpit.command を開き、表示された接続キーを貼り付けてください。</p>
+        <input aria-label="端末内の接続キー" placeholder="接続キーを入力してください" type="password" autoComplete="off" value={connectionKey} disabled={connected || !!importing || !!recognizing} onChange={e => setConnectionKey(e.target.value)} className="w-full rounded border border-line bg-ink-850 p-2 placeholder:text-paper-faint" />
+        <button type="button" className="btn btn-primary" disabled={!connectionKey.trim() || !!importing || !!recognizing} onClick={async () => {
+          if (connected) { setConnected(false); setConnectionKey(""); setLocalStatus(""); return; }
+          const controller = new AbortController(); recognitionAbort.current = controller;
+          try { await connectLocal(connectionKey.trim(), controller.signal); if (!controller.signal.aborted) { setConnectionKey(connectionKey.trim()); setConnected(true); setLocalStatus("接続済み。ファイルを読み込み、一覧の「文字起こしを開始」を押してください。"); } }
+          catch { if (!controller.signal.aborted) setLocalStatus("接続できません。補助ツールの起動・接続キー・ブラウザーのローカル接続許可を確認してください。"); }
+          finally { recognitionAbort.current = null; }
+        }}>{connected ? "接続を解除" : "端末内ツールに接続"}</button>
+        {!connected && !connectionKey.trim() && <p className="text-xs text-paper-dim">接続キーを入力すると、色付きの接続ボタンを押せます。</p>}
+        <p className="text-xs text-paper-faint">動画 → 音声WAVの作成 → 精密文字起こし。音声ファイルは抽出工程を省いて認識します。発言は短縮しません。接続キーは保存・同期しません。ブラウザーにローカル接続の許可が表示されたら許可してください。</p>
+        <p className="text-xs text-paper-faint">補助ツールの結果・抽出WAVはMacの Documents/CockpitTranscripts に保存されます。接続しない場合は録音の登録と確認済みJSONの手動取り込みを利用できます。</p>
+        {localStatus && <p role="status" className="text-sm">{localStatus}</p>}
+        {recognizing && <button className="btn btn-sm" type="button" onClick={() => recognitionAbort.current?.abort()}>文字起こしを中止</button>}
+      </div>
+      <p className="mt-2 text-xs text-paper-faint">音声・動画は外部へ送信しません。文字起こし結果は案件データとして暗号化して保存・同期します。原本は別途保管してください。</p>
+      {(importing || recognizing) && (
+        <div role="status" aria-live="polite" className="mt-3 flex items-center gap-3 rounded border border-brand bg-brand-soft p-3">
+          <span aria-hidden="true" className="inline-block h-6 w-6 shrink-0 animate-spin rounded-full border-[3px] border-brand border-t-transparent motion-reduce:animate-none" />
+          <span className="text-sm">{recognizing ? localStatus : `ファイル読み込み中：${importing?.name}（${importing?.pct}%）`}</span>
+        </div>
+      )}
       {/* 取り込みゾーン */}
       <div
         className={`mt-3 rounded-sm border border-dashed px-4 py-6 text-center transition-colors ${
@@ -214,12 +327,11 @@ export function CaseRecordings() {
           setOver(false);
           void importFiles(Array.from(e.dataTransfer.files));
         }}
-        onClick={() => inputRef.current?.click()}
-        role="button"
       >
         <input
           ref={inputRef}
           type="file"
+          disabled={!!importing || !!recognizing}
           accept={MEDIA_ACCEPT}
           multiple
           className="hidden"
@@ -229,6 +341,14 @@ export function CaseRecordings() {
             void importFiles(fs);
           }}
         />
+        <button
+          type="button"
+          className="btn btn-primary mb-3"
+          disabled={!!importing || !!recognizing}
+          onClick={() => inputRef.current?.click()}
+        >
+          映像・音声ファイルを読み込む
+        </button>
         {importing ? (
           <p className="text-[13px] text-paper">
             取り込み中: {importing.name}（{importing.pct}%）
@@ -238,9 +358,9 @@ export function CaseRecordings() {
           </p>
         ) : (
           <p className="text-[13px] text-paper-dim">
-            ここに映像・音声ファイルをドロップ（またはクリックして選択）
+            上のボタンで選択するか、ここに映像・音声ファイルをドロップ
             <span className="mt-1 block text-[11px] text-paper-faint">
-              mp4 / webm / mov / mp3 / m4a / wav など。サイズの上限はありません。
+              mp4 / webm / mov / mp3 / m4a / wav など。最大3時間・4GBまで。
             </span>
           </p>
         )}
@@ -250,6 +370,20 @@ export function CaseRecordings() {
           <Note tone="alert">{importError}</Note>
         </div>
       )}
+
+      <input ref={sourceRef} type="file" accept={MEDIA_ACCEPT} className="hidden" onChange={async e => {
+        const file = e.target.files?.[0];
+        e.target.value = "";
+        const recording = list.find(r => r.id === sourceFor);
+        setSourceFor(null);
+        if (!file || !recording) return;
+        if (file.name.normalize("NFC") !== recording.name.normalize("NFC") || file.size !== recording.size) {
+          setImportError("登録時と同じ名前・サイズの原本を選択してください。");
+          return;
+        }
+        mediaFiles.current.set(recording.id, file);
+        await startTranscription(recording);
+      }} />
 
       {/* 一覧 */}
       <div className="mt-4 space-y-2.5">
@@ -271,6 +405,7 @@ export function CaseRecordings() {
                   {formatDuration(r.durationSec) ? `・${formatDuration(r.durationSec)}` : ""}
                 </span>
                 <span className="text-[11px] text-paper-faint">{jpDate(r.addedAt)}</span>
+                {r.localRecognition && !r.transcriptReview && <Badge color="#B7791F">精密文字起こし・要確認</Badge>}
               </div>
 
               <div className="mt-2 grid gap-2 lg:grid-cols-[1fr_180px]">
@@ -289,26 +424,32 @@ export function CaseRecordings() {
                 />
               </div>
 
-              <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                <button className="btn btn-sm" onClick={() => void openPlayer(r)} disabled={ps.busy}>
+              <div className="mt-2 flex flex-wrap items-center gap-1.5" aria-busy={recognizing === r.id}>
+                <button type="button" className="btn btn-primary btn-sm" disabled={!connected || !!importing || !!recognizing || !!r.transcript || !!r.transcriptReview} onClick={() => void startTranscription(r)}>
+                  {recognizing === r.id ? "文字起こし処理中…" : r.transcript ? "文字起こし保存済み" : "文字起こしを開始"}
+                </button>
+                {!connected && !r.transcript && <span className="text-xs text-paper-faint">上の接続キー欄で端末内ツールに接続してください。</span>}
+                <button className="btn btn-sm" onClick={() => void openPlayer(r)} disabled={ps.busy || r.sourceOnly}>
                   {ps.busy ? "読み込み中…" : open ? "閉じる" : "再生"}
                 </button>
-                <button className="btn btn-sm" onClick={() => void download(r)} disabled={ps.busy}>
+                <button className="btn btn-sm" onClick={() => void download(r)} disabled={ps.busy || r.sourceOnly}>
                   ダウンロード
                 </button>
                 <button className="btn btn-sm" onClick={() => setTranscriptFor(r.id)}>
-                  {r.transcript ? "文字起こしを見る・差し替える" : "文字起こしを取り込む"}
+                  {r.transcript ? "文字起こしを見る・差し替える" : "精密文字起こしを取り込む"}
                 </button>
+                {r.transcription && <span className="text-xs text-paper-faint">保存済み {Math.ceil(r.transcription.completedSeconds / 60)} / {Math.ceil(r.transcription.totalSeconds / 60)}分</span>}
+                {r.sourceOnly && <span className="text-xs text-paper-faint">原本はアプリに保管されません。精密文字起こしには保管した原本を使用してください。</span>}
                 {r.transcript && (
                   <button className="btn btn-primary btn-sm" onClick={() => setAutofillFor(r.id)}>
                     設問の下書きを作る
                   </button>
                 )}
-                <ConfirmButton
+                {!recognizing && <ConfirmButton
                   label="削除"
                   confirmLabel="本当に削除（端末から消えます）"
                   onConfirm={() => removeRecording(r)}
-                />
+                />}
                 {r.transcript && (
                   <span className="text-[11px] text-paper-faint">
                     文字起こし {r.transcript.length.toLocaleString("ja-JP")} 字
@@ -340,21 +481,16 @@ export function CaseRecordings() {
       </div>
 
       <Note tone="info">
-        ファイルはこの端末にだけ保存されます。別の端末やブラウザからは開けません。バックアップ（JSON）にも含まれないため、原本は別途保管してください。
+        64MB以下の原本はこの端末にだけ保存されます。大容量の原本はアプリには保管されません。バックアップ（JSON）にも含まれないため、原本は別途保管してください。
       </Note>
 
       {transcriptFor && (
         <TranscriptModal
           rec={list.find((z) => z.id === transcriptFor) ?? null}
           onClose={() => setTranscriptFor(null)}
-          onSave={(id, name, text) => {
+          onSave={(id, name, text, review) => {
             void patch((x) => {
-              const t = x.recordings?.find((z) => z.id === id);
-              if (t) {
-                t.transcriptName = name;
-                t.transcript = text;
-                t.transcriptAt = new Date().toISOString();
-              }
+              applyTranscriptImport(x, id, name, text, review);
             });
             setTranscriptFor(null);
           }}
@@ -372,17 +508,22 @@ export function CaseRecordings() {
 }
 
 /** 文字起こしの取り込み（ファイルまたは貼り付け） */
-function TranscriptModal({
+export function TranscriptModal({
   rec,
   onClose,
   onSave,
 }: {
   rec: RecordingMeta | null;
   onClose: () => void;
-  onSave: (id: string, name: string, text: string) => void;
+  onSave: (id: string, name: string, text: string, review?: TranscriptReview) => void;
 }) {
   const [text, setText] = useState(rec?.transcript ?? "");
   const [name, setName] = useState(rec?.transcriptName ?? "");
+  const [review, setReview] = useState<TranscriptReview | undefined>(rec?.transcriptReview);
+  const [confirmed, setConfirmed] = useState(false);
+  const [error, setError] = useState("");
+  const readId = useRef(0);
+  useEffect(() => () => { readId.current++; }, []);
   const fileRef = useRef<HTMLInputElement>(null);
   if (!rec) return null;
 
@@ -399,8 +540,8 @@ function TranscriptModal({
           </button>
           <button
             className="btn btn-primary btn-sm"
-            disabled={!text.trim()}
-            onClick={() => onSave(rec.id, name, text.trim())}
+            disabled={!text.trim() || !!error || (!!review && !confirmed)}
+            onClick={() => onSave(rec.id, name, text.trim(), review)}
           >
             取り込む
           </button>
@@ -409,27 +550,34 @@ function TranscriptModal({
     >
       <div className="space-y-3">
         <p className="text-[12px] leading-relaxed text-paper-dim">
-          Google Meet の文字��こし（.vtt / .sbv など）やテキストを取り込みます。タイムスタンプは自動で除きます。
+          端末内補助ツールの確認済みJSON、字幕、テキストを取り込みます。取り込む前に対象の録音と内容を確認してください。
         </p>
         <input
           ref={fileRef}
           type="file"
-          accept={TRANSCRIPT_ACCEPT}
+          accept={TRANSCRIPT_ACCEPT + ",.json"}
           className="hidden"
           onChange={(e) => {
             const f = e.target.files?.[0];
             e.target.value = "";
             if (!f) return;
-            if (!isTranscriptFile(f.name)) return;
+            const id = ++readId.current;
+            setError("");
+            if (f.size > MAX_REVIEW_BYTES) { setError("2MB以下の文字起こしファイルを選択してください。"); return; }
+            if (!isTranscriptFile(f.name) && !f.name.toLowerCase().endsWith(".json")) return;
             void f.text().then((raw) => {
-              setText(parseTranscript(raw, f.name));
-              setName(f.name);
+              if (readId.current !== id) return;
+              const parsed = f.name.toLowerCase().endsWith(".json") ? parseTranscriptReview(raw) : undefined;
+              setText(parsed ? parsed.importedText : parseTranscript(raw, f.name));
+              setReview(parsed); setConfirmed(false); setName(f.name);
+            }).catch((err: unknown) => {
+              if (readId.current === id) setError(err instanceof Error ? err.message : "ファイルを読み込めませんでした。");
             });
           }}
         />
         <div className="flex flex-wrap items-center gap-2">
           <button className="btn btn-sm" onClick={() => fileRef.current?.click()}>
-            ファイルから取り込む（vtt / srt / sbv / txt）
+            ファイルから取り込む（確認済みJSON / 字幕 / txt）
           </button>
           {name && <span className="text-[11px] text-paper-faint">{name}</span>}
           {text && (
@@ -438,10 +586,17 @@ function TranscriptModal({
             </span>
           )}
         </div>
+        {error && <p role="alert" className="text-sm text-red-400">{error}</p>}
+        {review && <div className="space-y-2 text-sm">
+          <p>元の録音名: {review.sourceName} ／ {review.segments.length}区間を確認済み</p>
+          <details><summary>補正前の認識文を確認</summary><pre className="whitespace-pre-wrap text-xs">{review.originalText}</pre></details>
+          <label className="flex gap-2"><input type="checkbox" checked={confirmed} onChange={e => setConfirmed(e.target.checked)} />この案件の「{rec.name}」に対応する内容であることを確認しました</label>
+          <p className="text-xs">原文も案件内に保存します。予算・日付・決定事項への反映は、設問の下書き画面で別途確認してください。</p>
+        </div>}
         <Area
           label="文字起こし本文（直接貼り付けもできます）"
           value={text}
-          onChange={setText}
+          onChange={(value) => { readId.current++; setText(value); setConfirmed(false); }}
           rows={14}
         />
       </div>

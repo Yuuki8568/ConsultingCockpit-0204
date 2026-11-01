@@ -1,3 +1,5 @@
+import { setupWriteSigning,signSync } from "../write-signing";
+import { authorize } from "../step-up";
 /**
  * 金庫ストア。アプリの状態はすべてここを通る。
  *
@@ -16,6 +18,7 @@
  * - それ以外の小物（goals / salesKpi / referrals / UI状態） = meta:app
  * こうすると1案件を直しただけで全データを送り直すことがなくなる。
  */
+import { MAX_SYNC_RECORDS } from "../../../shared/sync-limits";
 import type { CaseRecord, LeadRecord, VaultState } from "../../domain/types";
 import { assertUniqueImportIds, normalizeVaultState } from "../../domain/logic/state";
 import { client } from "../api";
@@ -188,6 +191,14 @@ export class VaultStore {
   getBackupKdf() {
     if (!this.isUnlocked() || !this.backupKdf) throw new Error("バックアップの鍵情報がありません。再度解錠してください");
     return { ...this.backupKdf };
+  }
+  async backupFingerprint(state: VaultState): Promise<string> {
+    const epoch = this.epoch;
+    const key = this.macKey;
+    if (!key || !this.key) throw new Error("金庫が施錠されています");
+    const result = await hmacHex(key, 'cc-backup-state-v1|' + JSON.stringify(state));
+    this.assertSession(epoch);
+    return result;
   }
   private assertSession(epoch: number): void {
     if (!this.key || epoch !== this.epoch) throw new Error("金庫の状態が変わりました。再度解錠してください");
@@ -566,13 +577,15 @@ export class VaultStore {
    * その編集を巻き込んで消してしまう。通信の前後で revision / キューの
    * 変化を見て、編集が挟まっていたら取り込みを次回に回す。
    */
+  async enableWriteSigning(){if(!this.key)throw new Error("金庫を解錠してください");await setupWriteSigning(this.key,this.generation);this.scheduleSync(100);}
+
   private async syncCritical(): Promise<void> {
     const key = this.key;
     const epoch = this.epoch;
     if (!key) return;
     {
       const revBefore = this.revision;
-      // 1回で送る数に上限を置く（サーバー側の受け取り上限は500件）。
+      // 1回の送信数をサーバーと揃え、外部通信の回数に余裕を残す。
       // 取り込み直後などは送信待ちが多くなるので、残りは続けて送る。
       //
       // サーバーの1件あたり上限（1MB）を超えるレコードは送ると
@@ -582,17 +595,24 @@ export class VaultStore {
       const allDirty = await idb.dirtyRecords();
       const oversized = allDirty.filter((r) => r.ciphertext.length > MAX_SYNC_CIPHERTEXT);
       const sendable = allDirty.filter((r) => r.ciphertext.length <= MAX_SYNC_CIPHERTEXT);
-      const dirty = sendable.slice(0, 200);
+      const dirty: LocalRecord[]=[];
+      let bytes=0;
+      for(const row of sendable.slice(0,MAX_SYNC_RECORDS)){
+        const size=new TextEncoder().encode(JSON.stringify(row)).byteLength;
+        if(bytes+size>3*1024*1024)break;
+        dirty.push(row);bytes+=size;
+      }
       const moreDirty = sendable.length > dirty.length;
       const since = (await idb.getMeta<number>(META_CURSOR)) ?? 0;
       const deviceId = deviceIdFor();
 
       this.assertSession(epoch);
-      const res = await client.sync.push({
+      const request = {
         generation: this.generation,
         deviceId,
         since,
         records: dirty.map((r) => ({
+          operation: (r.deleted ? "delete" : "put") as "delete"|"put",
           id: r.id,
           type: r.type as "case" | "lead" | "profile" | "template" | "meta" | "log",
           ciphertext: r.ciphertext,
@@ -602,7 +622,10 @@ export class VaultStore {
           // この編集が元にしたサーバー版。これが一致していれば競合扱いにしない。
           baseSeq: r.seq,
         })),
-      }, { signal: AbortSignal.timeout(15000) });
+      };
+      const proof=dirty.length?await signSync(key,request):undefined;
+      this.assertSession(epoch);
+      const res=await client.sync.push({...request,proof},{signal:AbortSignal.timeout(15000)});
 
       this.assertSession(epoch);
       // 送信できたものは dirty を落とす
@@ -663,10 +686,15 @@ export class VaultStore {
         }
       }
 
+      const resolvedConflicts = new Set(res.conflicts.map(c => c.id));
       // 受信差分を取り込む
       if (res.changed.length > 0) {
         const incoming: LocalRecord[] = [];
         for (const c of res.changed) {
+          // A later batch may still contain local edits. Do not replace those
+          // with an older server row; the next push resolves their baseSeq.
+          const local = await idb.getRecord(c.id);
+          if (local?.dirty && !resolvedConflicts.has(c.id)) continue;
           // 受け取った暗号文の指紋を取るために一度開く（他端末の変更だけなので件数は少ない）
           let hash: string | undefined;
           try {
@@ -989,7 +1017,7 @@ export class VaultStore {
     try { await open(this.key, journal.marker, "cc4-rekey-journal"); }
     catch {
       if (journal.request && this.generation === journal.generation) {
-        await client.vault.rekey(journal.request, { signal: AbortSignal.timeout(15000) });
+        await client.vault.rekey({...journal.request,authorization:await authorize("vault:rekey",journal.request)}, { signal: AbortSignal.timeout(15000) });
       }
       throw new Error("未完了の鍵変更を再送しました。変更先の新パスフレーズで再解錠してください。旧原本と復旧情報は保持されています");
     }

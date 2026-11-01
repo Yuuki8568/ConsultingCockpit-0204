@@ -1,7 +1,7 @@
 {
   "name": "sandbox-app-template",
   "private": true,
-  "packageManager": "bun@1.3.14",
+  "packageManager": "bun@1.4.4",
   "workspaces": [
     "packages/*"
   ],
@@ -25,9 +25,19 @@
     "test:security": "cd packages/web && bun test tests/security.test.ts",
     "test:blackbox": "cd packages/web && node node_modules/@playwright/test/cli.js test",
     "typecheck:security": "tsc --noEmit -p packages/web/tsconfig.app.json && tsc --noEmit -p packages/web/tsconfig.node.json",
-    "verify:security": "bun run typecheck:security && bun run test:security && bun run build:web && bun run test:blackbox"
+    "verify:security": "bun run typecheck:security && bun run test:security && bun run build:web && bun run test:blackbox",
+    "build:cloudflare": "bun run build:web && wrangler deploy --dry-run --env staging --outdir .wrangler/dry-run",
+    "deploy:cloudflare:staging": "wrangler deploy --env staging",
+    "deploy:cloudflare:production": "wrangler deploy --env production",
+    "test:cloudflare": "cd packages/web && bun test tests/cloudflare.test.ts",
+    "test:contracts": "bun test tests/*.test.ts",
+    "test:contract-ui": "bun tests/contract-actions.browser.ts",
+    "test:automatic-backup": "cd packages/web && node scripts/test-automatic-backup.cjs",
+    "test:hardening": "cd packages/web && bun test tests/hardening-core.test.ts",
+    "test:audit-witness": "node tests/audit-witness.cjs"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261016.1",
     "@tursodatabase/api": "^1.9.2",
     "@types/bun": "1.3.14",
     "@types/node": "^26.2.0",
@@ -38,12 +48,14 @@
     "semver": "^7.7.2",
     "turbo": "2.9.18",
     "typescript": "5.9.3",
+    "wrangler": "4",
     "zod": "^4.3.6"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1023.0",
     "@libsql/client": "^0.17.2",
     "cloudflare": "^5.2.0",
+    "jose": "6",
     "pm2": "^7.0.1"
   }
 }

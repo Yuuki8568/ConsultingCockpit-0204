@@ -1,4 +1,5 @@
 /** ④単価設計 — 積算・3レンジ・アラート・トークスクリプト・成熟度連動レンジ・支援メニュー推奨 */
+import { contractTodayJst, verifiedCalendarDate } from "../../domain/logic/contract-actions";
 import { useState } from "react";
 import { useCurrentCase } from "../../hooks/use-current";
 import { useVault } from "../../hooks/use-vault";
@@ -41,6 +42,8 @@ import {
   buildPricingDefaults,
   calculatePricing,
   formatYen,
+  legacyNetToGross,
+  grossToLegacyNet,
   generateTalk,
 } from "../../domain/logic/pricing";
 import { applySanpoAutofill } from "../../domain/logic/sanpo";
@@ -316,9 +319,9 @@ export function CasePricing() {
           }
         >
           <Grid cols={3}>
-            <Stat label="下限" value={`¥${formatYen(stageDef.lo)}`} color="#6B665F" />
-            <Stat label="標準" value={`¥${formatYen(stageDef.std)}`} color="#0e7490" />
-            <Stat label="上限" value={`¥${formatYen(stageDef.hi)}`} color="#4A7C59" />
+            <Stat label="下限" value={`¥${formatYen(legacyNetToGross(stageDef.lo))}`} color="#6B665F" />
+            <Stat label="標準" value={`¥${formatYen(legacyNetToGross(stageDef.std))}`} color="#0e7490" />
+            <Stat label="上限" value={`¥${formatYen(legacyNetToGross(stageDef.hi))}`} color="#4A7C59" />
           </Grid>
           <div className="mt-3 space-y-1.5 text-[13px] leading-relaxed">
             <p>
@@ -370,9 +373,9 @@ export function CasePricing() {
             }
           />
           <NumField
-            label="自分の時間単価"
-            value={inputs.baseline}
-            onChange={(v) => setInputs((i) => void (i.baseline = v))}
+            label="自分の時間単価（税込）"
+            value={legacyNetToGross(inputs.baseline)}
+            onChange={(v) => setInputs((i) => void (i.baseline = grossToLegacyNet(v)))}
             suffix="円/時"
             step={500}
           />
@@ -426,9 +429,9 @@ export function CasePricing() {
             options={toOpts(DURATION_LABEL)}
           />
           <NumField
-            label="他社の見積（分かれば）"
-            value={inputs.competitor}
-            onChange={(v) => setInputs((i) => void (i.competitor = v))}
+            label="他社の見積（税込・分かれば）"
+            value={legacyNetToGross(inputs.competitor)}
+            onChange={(v) => setInputs((i) => void (i.competitor = grossToLegacyNet(v)))}
             suffix="円"
             step={100000}
             hint="入れると、高すぎ・安すぎの注意が出ます。"
@@ -456,39 +459,39 @@ export function CasePricing() {
         <Empty>まだ計算していません。材料を入れて「計算する」を押してください。</Empty>
       ) : (
         <>
-          <Panel title="出た金額" note="税抜です。請求時に消費税を上乗せしてください。">
+          <Panel title="出た金額" note="税込です。消費税を重ねて上乗せしないでください。内訳は請求書ごと・税率ごとに計算します。">
             <Grid cols={3}>
               <Stat
                 label="堅実プラン"
-                value={<Mask>¥{formatYen(result.safe)}</Mask>}
+                value={<Mask>¥{formatYen(legacyNetToGross(result.safe))}</Mask>}
                 sub="範囲を絞ったとき"
                 color="#6B665F"
               />
               <Stat
                 label="推奨プラン"
-                value={<Mask>¥{formatYen(result.recommended)}</Mask>}
-                sub={`時間単価に換算すると ¥${formatYen(Math.round(result.recommended / Math.max(1, inputs.hours)))}/h`}
+                value={<Mask>¥{formatYen(legacyNetToGross(result.recommended))}</Mask>}
+                sub={`時間単価に換算すると ¥${formatYen(Math.round(legacyNetToGross(result.recommended) / Math.max(1, inputs.hours)))}/h`}
                 color="#0e7490"
               />
               <Stat
                 label="挑戦プラン"
-                value={<Mask>¥{formatYen(result.challenge)}</Mask>}
+                value={<Mask>¥{formatYen(legacyNetToGross(result.challenge))}</Mask>}
                 sub="内容を広げたとき"
                 color="#4A7C59"
               />
             </Grid>
 
             <div className="mt-4">
-              <Sec>金額の内訳</Sec>
+              <Sec>金額の内訳（税込換算の目安）</Sec>
               <table className="tbl">
                 <tbody>
                   <tr>
                     <td>基準額</td>
                     <td className="text-[12px] text-paper-dim">
-                      {inputs.hours}時間 × ¥{formatYen(inputs.baseline)}/h
+                      {inputs.hours}時間 × ¥{formatYen(legacyNetToGross(inputs.baseline))}/h
                     </td>
                     <td className="n">
-                      <Mask>¥{formatYen(result.base)}</Mask>
+                      <Mask>¥{formatYen(legacyNetToGross(result.base))}</Mask>
                     </td>
                   </tr>
                   <tr>
@@ -534,14 +537,14 @@ export function CasePricing() {
                       {result.deliverableCount}点 × 基準額の5%
                     </td>
                     <td className="n">
-                      <Mask>+¥{formatYen(Math.round(result.deliverableAdd))}</Mask>
+                      <Mask>+¥{formatYen(legacyNetToGross(result.deliverableAdd))}</Mask>
                     </td>
                   </tr>
                   <tr>
                     <td className="font-medium">合計（丸める前）</td>
                     <td />
                     <td className="n font-medium">
-                      <Mask>¥{formatYen(Math.round(result.adjusted))}</Mask>
+                      <Mask>¥{formatYen(legacyNetToGross(result.adjusted))}</Mask>
                     </td>
                   </tr>
                 </tbody>
@@ -595,7 +598,7 @@ export function CasePricing() {
                 }
                 suffix="円"
                 step={10000}
-                hint={`推奨プランの税込は ¥${formatYen(Math.round(result.recommended * 1.1))} です。`}
+                hint={`推奨プランの税込は ¥${formatYen(legacyNetToGross(result.recommended))} です。`}
               />
               <Field
                 label="見積の有効期限"
@@ -627,7 +630,7 @@ export function CasePricing() {
                 className="btn btn-sm"
                 onClick={() =>
                   void patch((x) => {
-                    x.estimate.totalIncTax = Math.round(result.safe * 1.1);
+                    x.estimate.totalIncTax = legacyNetToGross(result.safe);
                     applySanpoAutofill(x, "④単価設計で見積を確定");
                   })
                 }
@@ -638,7 +641,7 @@ export function CasePricing() {
                 className="btn btn-sm"
                 onClick={() =>
                   void patch((x) => {
-                    x.estimate.totalIncTax = Math.round(result.recommended * 1.1);
+                    x.estimate.totalIncTax = legacyNetToGross(result.recommended);
                     applySanpoAutofill(x, "④単価設計で見積を確定");
                   })
                 }
@@ -649,7 +652,7 @@ export function CasePricing() {
                 className="btn btn-sm"
                 onClick={() =>
                   void patch((x) => {
-                    x.estimate.totalIncTax = Math.round(result.challenge * 1.1);
+                    x.estimate.totalIncTax = legacyNetToGross(result.challenge);
                     applySanpoAutofill(x, "④単価設計で見積を確定");
                   })
                 }
@@ -686,20 +689,19 @@ export function CasePricing() {
                   onChange={(v) => void patch((x) => void (x.invoice.dueDate = v))}
                   hint="前払いの入金期限です。未入金のままこの日が来ると、次にやることに「入金待ち・着手保留」が自動で出ます。"
                 />
+                <Field label="確認した実入金日" type="date" value={c.invoice.paidAt} onChange={(v) => void patch((x) => { x.invoice.paidAt = v; x.invoice.paidFlag = false; })} hint="予定日や今日の日付で補いません。実入金日を入力し、下のボタンで証拠確認を記録してください。" />
                 <div>
                   <span className="field-label">入金（確認後に着手）</span>
                   <button
                     className={`btn w-full ${c.invoice.paidFlag ? "btn-primary" : ""}`}
                     onClick={() =>
                       void patch((x) => {
+                        if (!x.invoice.paidFlag && (!verifiedCalendarDate(x.invoice.paidAt) || x.invoice.paidAt > contractTodayJst())) { window.alert("確認済みの実入金日を入力してください。未来日や未入力を入金済みとは扱いません。"); return; }
                         x.invoice.paidFlag = !x.invoice.paidFlag;
-                        x.invoice.paidAt = x.invoice.paidFlag
-                          ? new Date().toISOString().slice(0, 10)
-                          : "";
                       })
                     }
                   >
-                    {c.invoice.paidFlag ? `入金確認済み（${c.invoice.paidAt}）→ 着手可` : "未入金・着手保留"}
+                    {c.invoice.paidFlag ? `入金確認済み（${c.invoice.paidAt}）。合意・通知した開始日を確認` : "未入金・着手保留"}
                   </button>
                 </div>
               </Grid>

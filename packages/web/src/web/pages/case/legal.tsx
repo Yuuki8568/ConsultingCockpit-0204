@@ -1,3 +1,6 @@
+import { SERVICE_SCOPE_NOTICE, ADMINISTRATIVE_SCRIVENER_EXPLANATION } from '../../domain/data/service-scope';
+import { recheckDocumentRelease } from '../../domain/logic/docs';
+import { unresolvedContractMarkers } from '../../domain/logic/contract-placeholders';
 /** ⑨契約・法務チェック — 書類の状態管理・チェックリスト・書類生成・9書類まとめ出力 */
 import { useMemo } from "react";
 import { useCurrentCase } from "../../hooks/use-current";
@@ -11,11 +14,19 @@ import {
   Panel,
   Sec,
 } from "../../components/kit";
+import { hasRevisedContractFacts, isApprovedVersion, templatesForVersion } from "../../domain/data/contract-latest";
+import { ContractActionPanel } from "../../components/contract-action-panel";
+import { ContractFactsPanel } from "../../components/contract-facts-panel";
+import { missingContractFacts } from "../../domain/logic/contract-facts";
+import { contractGenerationBlock, selectNewContractVersion } from "../../domain/logic/contract-version";
 import { DOC_TYPE_DEFS } from "../../domain/data/doc-templates";
 import { LEGAL_CHECKLIST_ITEMS } from "../../domain/data/diagnosis-legal";
-import { fillTemplate, gatherTemplateContext, generateDocNo } from "../../domain/logic/docs";
+import { fillTemplate, gatherTemplateContext, generateDocNo, contextWithDocNo, savedDocumentsForExport, isSignedDocument, referencedDocument, changeDocumentStatus, changeDocumentSignedAt, documentReleaseBlock } from "../../domain/logic/docs";
 import { safeFileName } from "../../domain/logic/util";
+import { buildWordHtml } from "../../lib/export/word";
+import { ContractTestExport } from "../../components/contract-test-export";
 import { downloadZip } from "../../lib/export/zip";
+import { vaultStore } from "../../lib/store/vault-store";
 import { docViewer } from "../../lib/store/doc-viewer-store";
 import { trace } from "../../lib/trace";
 import type { DocStatus, GeneratedDoc } from "../../domain/types";
@@ -54,7 +65,7 @@ const PHASES = ["pre", "during", "post"] as const;
 
 export function CaseLegal() {
   const { c, patch } = useCurrentCase();
-  const { state, audit } = useVault();
+  const { state, audit, mutate } = useVault();
 
   const ctx = useMemo(
     () => (c && state ? gatherTemplateContext(c, state) : null),
@@ -82,7 +93,7 @@ export function CaseLegal() {
   const persistDocContent = (docId: string, content: string) => {
     void patch((x) => {
       const t = x.generatedDocs.find((z) => z.id === docId);
-      if (t) t.content = content;
+      if (t && !isSignedDocument(x, t)) t.content = content;
     });
   };
 
@@ -99,16 +110,29 @@ export function CaseLegal() {
         title: (DOC_TYPE_DEFS as Record<string, { jp: string }>)[g.docType]?.jp ?? g.docType,
         docNo: g.docNo,
         company: c.settings.companyName || "",
+        readOnly: isSignedDocument(c, g),
+        releaseBlocked: documentReleaseBlock(c, g),
+        templateVersion: g.templateVersion,
       },
       typeof g.content === "string" ? g.content : "",
       (content) => persistDocContent(g.id, content),
     );
   };
 
-  const generate = (docType: string) => {
+  const generate = async (docType: string) => {
+    const versionBlock=contractGenerationBlock(c);
+    if(versionBlock) { window.alert(versionBlock); return; }
+    const referenced = referencedDocument(c, docType);
+    if (c.legalDocs[statusKey(docType)]?.status === "signed" || (referenced && isSignedDocument(c, referenced))) {
+      window.alert("締結済みの書類は再生成しません。変更契約は別途確認してください。");
+      return;
+    }
     trace("generate_begin", { docType });
     try {
-      const tpl = state.docTemplates[docType];
+      const newVersion = isApprovedVersion(c.contractTemplateVersion);
+      const tpl = newVersion ? (templatesForVersion(c.contractTemplateVersion) as Record<string, string>)[docType] : state.docTemplates[docType];
+
+      const templateVersion = c.contractTemplateVersion;
       if (!tpl) {
         trace("generate_fail", { docType, reason: "no_template" });
         window.alert(
@@ -117,9 +141,15 @@ export function CaseLegal() {
         return;
       }
       const docNo = generateDocNo(docType, state);
-      const filled = fillTemplate(tpl, ctx);
+      const filled = fillTemplate(tpl, contextWithDocNo(ctx, docType, docNo));
+      const pending = newVersion ? [...missingContractFacts(c, docType), ...filled.missing, ...unresolvedContractMarkers(filled.text)] : [];
+      const releaseBlocked = pending.length ? `案件の未確認・未入力が残っています：${[...new Set(pending)].join("、")}。確認後に再生成、または保存本文を修正し「本文・条件を再確認」を実行してください。` : undefined;
       const id = "D" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-      void patch((x) => {
+      await patch((x) => {
+        const active = referencedDocument(x, docType);
+        if (x.legalDocs[statusKey(docType)]?.status === "signed" || (active && isSignedDocument(x, active))) throw new Error("締結済みの書類は再生成しません。");
+        if (x.contractTemplateVersion !== templateVersion) throw new Error("契約版が変更されました。内容を確認して再操作してください。");
+        if (x.generatedDocs.some((g) => g.docNo === docNo)) throw new Error("同じ書類番号が既に保存されています。再操作してください。");
         x.generatedDocs.push({
           id,
           docType,
@@ -127,11 +157,15 @@ export function CaseLegal() {
           issuedAt: new Date().toISOString().slice(0, 10),
           content: filled.text,
           status: "draft",
+          releaseBlocked,
+          releaseBlockKind: releaseBlocked && hasRevisedContractFacts(templateVersion) ? "case_facts_review" : undefined,
+          templateVersion,
         });
         const sk = statusKey(docType);
         x.legalDocs[sk] ??= { status: "todo", signedAt: "", docNo: "" };
         x.legalDocs[sk].docNo = docNo;
       });
+      if (!vaultStore.isUnlocked() || vaultStore.getState()?.currentCaseId !== c.id) return;
       audit("doc_generate", { docType, docNo });
       trace("generate_done", { docType });
       openViewer({
@@ -141,6 +175,8 @@ export function CaseLegal() {
         issuedAt: new Date().toISOString().slice(0, 10),
         content: filled.text,
         status: "draft",
+        releaseBlocked,
+        templateVersion,
       });
     } catch (e) {
       trace("generate_fail", {
@@ -156,21 +192,21 @@ export function CaseLegal() {
 
   const exportNine = () => {
     const company = safeFileName(c.settings.companyName || "無題");
-    const entries = NINE_DOCS.map((key, i) => {
-      const def = (DOC_TYPE_DEFS as Record<string, { jp: string }>)[key];
-      const tpl = state.docTemplates[key] ?? "";
-      const filled = fillTemplate(tpl, ctx);
-      const docNo = c.legalDocs[statusKey(key)]?.docNo || generateDocNo(key, state);
-      const html = wordHtml(def?.jp ?? key, docNo, filled.text);
-      return {
-        name: `${String(i + 1).padStart(2, "0")}_${def?.jp ?? key}_${docNo}.doc`,
-        content: html,
-      };
-    });
-    // 未入力の一覧も同梱する（渡す前に自分で埋めるためのメモ）
+    let saved: GeneratedDoc[];
+    try {
+      saved = savedDocumentsForExport(c, NINE_DOCS);
+    } catch (e) {
+      window.alert(`一括出力を中止しました。本文の再生成は行っていません。\n${e instanceof Error ? e.message : String(e)}`);
+      return;
+    }
     const missing = new Set<string>();
-    NINE_DOCS.forEach((key) => {
-      fillTemplate(state.docTemplates[key] ?? "", ctx).missing.forEach((m) => missing.add(m));
+    const entries = saved.map((g, i) => {
+      const def = (DOC_TYPE_DEFS as Record<string, { jp: string }>)[g.docType];
+      for (const match of g.content.matchAll(/\[要入力:([^\]]+)\]/g)) missing.add(match[1]!);
+      return {
+        name: `${String(i + 1).padStart(2, "0")}_${def?.jp ?? g.docType}_${g.docNo}.doc`,
+        content: buildWordHtml({ title: def?.jp ?? g.docType, docNo: g.docNo, body: g.content, fileName: "" }),
+      };
     });
     entries.push({
       name: "00_未入力の一覧.txt",
@@ -182,23 +218,37 @@ export function CaseLegal() {
               .map((m) => `・${m}`)
               .join("\n")
           : "空欄はありません。") +
-        `\n\n※ すべての書類は「免責事項(第3版)」と一体で運用します。\n※ 補助金の申請書類作成代行は行政書士の業務範囲です（行政書士法第19条）。当方は情報提供と、お客様ご自身が作成する書類への助言までを行います。\n`,
+        `\n\n※ すべての書類は「免責事項(第3版)」と一体で運用します。\n${SERVICE_SCOPE_NOTICE}\n`,
     });
     downloadZip(`${company}_契約書類一式_${new Date().toISOString().slice(0, 10)}`, entries);
     audit("nine_docs_export", { company: c.settings.companyName });
   };
 
-  const generatedFor = (docType: string) =>
-    c.generatedDocs.filter((g) => g.docType === docType).slice(-1)[0];
+
 
   return (
     <div className="space-y-4">
+      <Panel title="新規案件用の契約版" note="共通条件A〜Dは承認済みです。案件の事実確認・必須記録が揃うまで正式出力を止めます。既存書類・保存雛形・署名済み契約は変更しません。">
+        {c.contractTemplateVersion ? <Note tone="warn">選択中: {c.contractTemplateVersion}。署名済み本文は新しい版へ置換しません。</Note> : <>
+          <p className="mb-2 text-sm">現在は保存済みの旧版雛形です。新しい契約へ旧条件をそのまま流用しないでください。</p>
+          <button className="btn btn-primary btn-sm" onClick={() => {
+            if (!window.confirm("事業目的のB2B取引で、既存合意のない新規案件として、2026-10-24承認改訂版を選択しますか？保存済み雛形は変更せず、案件条件・情報管理票の確認が揃うまで正式出力を停止します。")) return;
+            void patch((x) => { const error = selectNewContractVersion(x); if (error) window.alert(error); });
+          }}>新規B2B案件に2026-10-24承認改訂版を選択</button>
+        </>}
+      </Panel>
+      <ContractActionPanel c={c} missingFacts={missingContractFacts(c)} evidence={c.contractActionEvidence} onEvidenceChange={(evidence) => { void patch((x) => { x.contractActionEvidence = evidence; }); }} onNavigate={(target) => {
+        if (target === "conditions") { const el = document.getElementById("contract-conditions"); el?.focus(); el?.scrollIntoView({ block: "start", behavior: "smooth" }); }
+        else void mutate((s) => { s.currentTab = target === "payment" ? "pricing" : "support"; }, ["meta:app"]);
+      }} />
+      {isApprovedVersion(c.contractTemplateVersion) && <ContractFactsPanel c={c} onChange={(facts) => { void patch((x) => { x.contractFacts = facts; }); }} />}
+      <ContractTestExport c={c} state={state} sourceVersion={__APP_SOURCE_VERSION__} />
       <Panel
         title="書類の状態"
-        note="契約時に揃える9書類。締結済みまで進めると、この案件は法務面で完了です。"
+        note="書類の管理状態です。状態表示だけで契約の有効性や業務の完了を判定しません。一括出力は保存済み本文のみを使います。"
         right={
           <button className="btn btn-primary btn-sm" onClick={exportNine}>
-            9書類をまとめて書き出す
+            保存済み書類をまとめて書き出す
           </button>
         }
       >
@@ -218,8 +268,9 @@ export function CaseLegal() {
                 const def = (DOC_TYPE_DEFS as Record<string, { jp: string; code: string }>)[key];
                 const sk = statusKey(key);
                 const d = c.legalDocs[sk] ?? { status: "todo", signedAt: "", docNo: "" };
-                const g = generatedFor(key);
-                const missing = fillTemplate(state.docTemplates[key] ?? "", ctx).missing.length;
+                const g = referencedDocument(c, key);
+                const locked = d.status === "signed" || Boolean(g && isSignedDocument(c, g));
+                const missing = g ? unresolvedContractMarkers(g.content).length : fillTemplate((isApprovedVersion(c.contractTemplateVersion) ? templatesForVersion(c.contractTemplateVersion)![key] : state.docTemplates[key]) ?? "", ctx).missing.length;
                 return (
                   <tr key={key}>
                     <td>
@@ -231,13 +282,12 @@ export function CaseLegal() {
                     <td>
                       <select
                         className="field py-1"
+                        disabled={locked}
                         value={d.status}
                         onChange={(e) =>
                           void patch((x) => {
-                            x.legalDocs[sk] ??= { status: "todo", signedAt: "", docNo: "" };
-                            x.legalDocs[sk].status = e.target.value as DocStatus;
-                            if (e.target.value === "signed" && !x.legalDocs[sk].signedAt)
-                              x.legalDocs[sk].signedAt = new Date().toISOString().slice(0, 10);
+                            const error = changeDocumentStatus(x, key, e.target.value as DocStatus);
+                            if (error) window.alert(error);
                           })
                         }
                       >
@@ -252,11 +302,12 @@ export function CaseLegal() {
                       <input
                         type="date"
                         className="field num py-1"
+                        disabled={locked}
                         value={d.signedAt}
                         onChange={(e) =>
                           void patch((x) => {
-                            x.legalDocs[sk] ??= { status: "todo", signedAt: "", docNo: "" };
-                            x.legalDocs[sk].signedAt = e.target.value;
+                            const error = changeDocumentSignedAt(x, key, e.target.value);
+                            if (error) window.alert(error);
                           })
                         }
                       />
@@ -267,6 +318,10 @@ export function CaseLegal() {
                         <button className="btn btn-sm" onClick={() => generate(key)}>
                           作る
                         </button>
+                        {g?.releaseBlockKind === 'case_facts_review' && !locked && <button className="btn btn-sm" onClick={() => {
+                          if (!window.confirm('案件条件と保存本文の実際の記載・合意を確認しましたか？未入力の検出を再確認します。法的適合性・契約成立の自動認定ではありません。編集画面は閉じてから操作してください。')) return;
+                          void patch(x=>{const error=recheckDocumentRelease(x,g.id);if(error) window.alert(error);});
+                        }}>本文・条件を再確認</button>}
                         {g && (
                           <button className="btn btn-sm" onClick={() => openViewer(g)}>
                             見る
@@ -391,22 +446,22 @@ export function CaseLegal() {
 
       <Panel
         title="補助金について"
-        note="どこまでやるかの線は法律で決まっています。ここを越えないでください。"
+        note="事務所の受託対象外と法令上の制限を区別します。個別の法的分類を自動認定しません。"
       >
         <Grid cols={2}>
           <div className="rounded-sm border border-ok/40 bg-ok/8 px-3 py-2.5">
             <div className="mb-1.5 text-[12px] font-medium text-ok">できること</div>
             <ul className="space-y-1 text-[12px] leading-relaxed text-paper-dim">
               <li>・活用できそうな制度の情報提供</li>
-              <li>・お客様ご自身が作る事業計画書への助言</li>
+              <li>・通常の業務改善支援（実質的な申請書類の代筆・作成を除く）</li>
               <li>・AI導入計画の設計・伴走支援</li>
-              <li>・提携する行政書士の紹介（紹介料は受け取らない）</li>
+              <li>・制度・業務に応じた適切な専門家への相談案内（提携の有無は要確認）</li>
             </ul>
           </div>
           <div className="rounded-sm border border-alert/40 bg-alert/8 px-3 py-2.5">
             <div className="mb-1.5 text-[12px] font-medium text-alert">できないこと</div>
             <ul className="space-y-1 text-[12px] leading-relaxed text-paper-dim">
-              <li>・申請書・事業計画書の有償での作成代行</li>
+              <li>・申請書類・申請用事業計画書の作成代行・実質的な代筆</li>
               <li>・成功報酬型での申請支援</li>
               <li>・申請システムへの代理入力・代理提出</li>
               <li>・採択されるという説明</li>
@@ -415,7 +470,7 @@ export function CaseLegal() {
         </Grid>
         <div className="mt-3">
           <Note tone="alert">
-            改正行政書士法第19条により、名目を問わず無資格での有償作成代行は認められません。
+            {SERVICE_SCOPE_NOTICE}<br />{ADMINISTRATIVE_SCRIVENER_EXPLANATION}
             提案書にもこの範囲を明記してください（②の提案書骨子には自動で入ります）。
           </Note>
         </div>
@@ -455,11 +510,15 @@ export function CaseLegal() {
                           <ConfirmButton
                             label="削除"
                             onConfirm={() => {
+                              if (isSignedDocument(c, g)) {
+                                window.alert("締結済みの書類はこの画面から削除できません。");
+                                return;
+                              }
                               // 開いている書類が消える場合はビューアも閉じる
                               if (docViewer.getDoc()?.docId === g.id) docViewer.close();
                               void patch((x) => {
                                 const i = x.generatedDocs.findIndex((z) => z.id === g.id);
-                                if (i >= 0) x.generatedDocs.splice(i, 1);
+                                if (i >= 0 && !isSignedDocument(x, x.generatedDocs[i]!)) x.generatedDocs.splice(i, 1);
                               });
                             }}
                           />
@@ -476,10 +535,4 @@ export function CaseLegal() {
       {/* 書類の表示モーダルは app.tsx の DocViewerModal が担う（ここには置かない） */}
     </div>
   );
-}
-
-function wordHtml(title: string, docNo: string, body: string): string {
-  const esc = (s: string) =>
-    String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  return `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40"><head><meta charset="UTF-8"><title>${esc(title)}</title><style>@page{size:A4 portrait;margin:18mm}body{font-family:"Yu Gothic","Meiryo",sans-serif;font-size:10.5pt;line-height:1.8}h1{font-size:13pt;text-align:center;border-bottom:2px solid #0e7490;padding-bottom:6px;margin:0 0 12px}.docno{text-align:right;font-size:9pt;color:#666}pre{white-space:pre-wrap;font-family:inherit;margin:0}</style></head><body><div class="docno">${esc(docNo)}</div><h1>${esc(title)}</h1><pre>${esc(body)}</pre></body></html>`;
 }

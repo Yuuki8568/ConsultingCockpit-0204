@@ -1,3 +1,6 @@
+import { PasskeyPanel } from "./passkey-panel";
+import { authorize } from "../lib/step-up";
+import { rewrapWriteKey } from "../lib/write-signing";
 /** 設定 — 受託者プロフィール／書類雛形／文面ライブラリ／紹介／保全／端末／監査／取込 */
 import { useEffect, useRef, useState } from "react";
 import { useVault } from "../hooks/use-vault";
@@ -33,6 +36,7 @@ import { SEC_CONFIG } from "../lib/security";
 import { buildEncryptedBackup, decryptBackup, isEncryptedBackup } from "../lib/export/backup";
 import { deviceIdFor, vaultStore } from "../lib/store/vault-store";
 import { useDesktop } from "../hooks/use-desktop";
+import { AutomaticBackupSettings } from "./automatic-backup";
 import { DesktopBackup } from "./desktop-backup";
 
 type Tab = "profile" | "templates" | "messages" | "referrals" | "security" | "data";
@@ -138,10 +142,11 @@ function TemplatesTab() {
       <Note tone="info">
         雛形の中の <code>{"{{甲企業名}}"}</code> のような部分は、書類を作るときに
         案件情報と受託者プロフィールから自動で埋まります。
+        ここは旧案件用の保存雛形です。新規案件の2026-10-23承認版は版を固定して別管理し、この画面の上書きでは更新しません。新規版の案件条件は⑨契約・法務の案件条件・情報管理票から確認してください。
       </Note>
 
       <Panel
-        title="12種類の雛形"
+        title="旧案件用・12種類の保存雛形"
         right={
           <ConfirmButton
             label="組込雛形で全部上書き"
@@ -386,26 +391,31 @@ function SecurityTab() {
   const [conflicts, setConflicts] = useState<{ id: string; at: number }[]>([]);
   const [busy, setBusy] = useState(false);
   const [rekeyOpen, setRekeyOpen] = useState(false);
+  const [loadErrors, setLoadErrors] = useState<Record<string,string>>({});
+  const [loading, setLoading] = useState(false);
+  const loadVersion = useRef(0);
   const myId = deviceIdFor();
 
   const load = async () => {
-    try {
-      const [d, h, c] = await Promise.all([
-        client.devices.list(),
-        client.devices.loginHistory({ limit: 50 }),
-        client.audit.count(),
-      ]);
-      setDevices(d as never);
-      setHistory(h as never);
-      setAuditCount(c.count);
-      setConflicts((await vaultStore.listConflicts()).map((x) => ({ id: x.id, at: x.at })));
-    } catch {
-      /* 通信できないときは表示しない */
-    }
+    const version = ++loadVersion.current;
+    setLoading(true);
+    const results = await Promise.allSettled([
+      client.devices.list(), client.devices.loginHistory({ limit: 50 }), client.audit.count(), vaultStore.listConflicts(),
+    ]);
+    if (version !== loadVersion.current) return;
+    const errors: Record<string,string> = {};
+    const [d,h,c,f] = results;
+    if(d.status==='fulfilled') setDevices(d.value); else { setDevices([]); errors.devices='端末一覧を取得できません。ログイン状態と通信を確認して再取得してください。'; }
+    if(h.status==='fulfilled') setHistory(h.value); else { setHistory([]); errors.history='ログイン履歴を取得できませんでした。端末一覧の取得とは別のエラーです。'; }
+    if(c.status==='fulfilled') setAuditCount(c.value.count); else { setAuditCount(null); errors.audit='操作記録の件数を取得できませんでした。'; }
+    if(f.status==='fulfilled') setConflicts(f.value.map(x=>({id:x.id,at:x.at}))); else { setConflicts([]); errors.conflicts='端末内の競合記録を取得できませんでした。'; }
+    setLoadErrors(errors);
+    setLoading(false);
   };
 
   useEffect(() => {
     void load();
+    return () => { ++loadVersion.current; };
   }, []);
 
   if (!state) return null;
@@ -452,7 +462,7 @@ function SecurityTab() {
         </div>
       </Panel>
 
-      <Panel title="同期の状態" right={<button className="btn btn-sm" onClick={() => void load()}>更新</button>}>
+      <Panel title="同期の状態" right={<button className="btn btn-sm" disabled={loading} onClick={() => void load()}>{loading ? "取得中…" : "更新"}</button>}>
         <Grid cols={3}>
           <Stat
             label="未送信"
@@ -472,6 +482,7 @@ function SecurityTab() {
         )}
       </Panel>
 
+      {Object.entries(loadErrors).filter(([key])=>key!=="devices").map(([key,message])=><Note key={key} tone="alert">{message}</Note>)}
       {conflicts.length > 0 && (
         <Panel title="同じ場所を別々に直した記録" note="後から保存した側を採用し、負けた側をここに残しています。">
           <div className="space-y-1.5">
@@ -500,8 +511,8 @@ function SecurityTab() {
       )}
 
       <Panel title="この金庫を開いている端末" note="使わなくなった端末は失効させてください。">
-        {devices.length === 0 ? (
-          <Empty>取得できませんでした。</Empty>
+        {loading ? <Empty>端末一覧を取得中…</Empty> : loadErrors.devices ? <div className="space-y-2"><Note tone="alert">{loadErrors.devices}</Note><button className="btn btn-primary" onClick={() => void load()}>再取得</button></div> : devices.length === 0 ? (
+          <Empty>登録済みの端末はありません。</Empty>
         ) : (
           <table className="tbl">
             <thead>
@@ -537,7 +548,7 @@ function SecurityTab() {
                       <button
                         className="btn btn-sm"
                         onClick={async () => {
-                          await client.devices.unrevoke({ id: d.id });
+                          await client.devices.unrevoke({id:d.id,authorization:await authorize("device:unrevoke",{id:d.id})});
                           void load();
                         }}
                       >
@@ -548,7 +559,7 @@ function SecurityTab() {
                         label="失効"
                         confirmLabel="失効させる"
                         onConfirm={async () => {
-                          await client.devices.revoke({ id: d.id });
+                          await client.devices.revoke({id:d.id,authorization:await authorize("device:revoke",{id:d.id})});
                           void load();
                         }}
                       />
@@ -583,13 +594,13 @@ function SecurityTab() {
       >
         <p className="mb-3 text-[12px] leading-relaxed text-paper-dim">
           1件ごとに直前の記録のハッシュを含めているため、途中を書き換えたり抜いたりすると
-          つながりが合わなくなります。対象企業名などの詳細は暗号化して保存しています。
+          つながりが合わなくなります。5分ごとに別の保存先へ末尾を記録します。直近の未記録部分の削除や、両方の保存先が改変された場合まで検出を保証するものではありません。対象企業名などの詳細は暗号化して保存しています。
         </p>
         {chain && (
           <Note tone={chain.ok ? "ok" : "alert"}>
             {chain.ok
-              ? `${chain.checked} 件すべてつながっています。書き換えや欠落は見つかりませんでした。`
-              : `つながりが切れています：${chain.reason}`}
+              ? `${chain.checked} 件の連鎖と、独立保存済みの地点が一致しました。`
+              : `検査未完了または不一致：${chain.reason}`}
           </Note>
         )}
 
@@ -708,6 +719,7 @@ function RekeyModal({ open, onClose }: { open: boolean; onClose: () => void }) {
       // レコードと録画を新しい鍵で封じ直す（録画は仮チャンクとして置く）
       prepared = await vaultStore.prepareReencrypt(newKeys.vaultKey, newKeys.macKey);
       const request = {
+        writeKey: await rewrapWriteKey(oldKeys.vaultKey,newKeys.vaultKey),
         expectedGeneration: prepared.generation,
         kdfSalt: salt,
         kdfIterations: SEC_CONFIG.KDF_ITERATIONS,
@@ -716,7 +728,7 @@ function RekeyModal({ open, onClose }: { open: boolean; onClose: () => void }) {
         records: prepared.records,
       };
       await vaultStore.saveRekeyRequest(request);
-      const res = await client.vault.rekey(request, { signal: AbortSignal.timeout(15000) });
+      const res = await client.vault.rekey({...request,authorization:await authorize("vault:rekey",request)}, { signal: AbortSignal.timeout(15000) });
       await vaultStore.commitReencrypt(newKeys.vaultKey, newKeys.macKey, prepared);
       vaultStore.setBackupKdf(salt, SEC_CONFIG.KDF_ITERATIONS);
       prepared = null;
@@ -968,6 +980,7 @@ function DataTab() {
         )}
       </Panel>
 
+      <PasskeyPanel /><AutomaticBackupSettings />
       <DesktopBackup />
 
       <Panel
@@ -1013,7 +1026,7 @@ function DataTab() {
         />
       </Panel>
 
-      <Panel title="すべて消す" note="預けてある分も、操作の記録も、端末の登録もすべて消します。">
+      <Panel title="すべて消す" note="業務データと暗号文の過去世代を消去します。不正防止用の監査記録・制限回数・端末失効情報・パスキーは保持します。">
         <Note tone="alert">
           この操作は戻せません。案件 {state.cases.length} 件・リード {state.leads.length}{" "}
           件と、すべての書類・記録が消えます。金庫そのものも作り直しになります。
@@ -1023,7 +1036,7 @@ function DataTab() {
             label="すべて消す"
             confirmLabel="本当にすべて消す（戻せません）"
             onConfirm={async () => {
-              await client.vault.eraseAll({ confirm: "ERASE" });
+              await client.vault.eraseAll({confirm:"ERASE",authorization:await authorize("vault:erase",{confirm:"ERASE"})});
               await vaultStore.wipeLocal();
               location.reload();
             }}

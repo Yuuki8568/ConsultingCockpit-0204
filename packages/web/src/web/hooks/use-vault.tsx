@@ -1,3 +1,4 @@
+import { authorize } from "../lib/step-up";
 /**
  * 金庫のライフサイクルを React に載せる層。
  * - Googleログイン済みか
@@ -292,12 +293,13 @@ export function VaultProvider({ children }: { children: ReactNode }) {
           SEC_CONFIG.KDF_ITERATIONS,
         );
         const verifier = await buildVerifier(vaultKey);
-        await client.vault.create({
+        const creation = {
           kdfSalt: salt,
           kdfIterations: SEC_CONFIG.KDF_ITERATIONS,
           verifierCiphertext: verifier.ciphertext,
           verifierIv: verifier.iv,
-        });
+        };
+        await client.vault.create({...creation,authorization:await authorize("vault:create",creation)});
         if (operation !== operationEpoch.current) throw new Error("操作が取り消されました");
         unlockedRef.current = true;
         const initial = makeEmptyVaultState();

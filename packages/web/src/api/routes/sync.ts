@@ -1,9 +1,15 @@
+import { appendAudit } from "../security/audit";
+import { verifyWrite } from "./write-keys";
+import { ciphertextInput, ivInput } from "../security/inputs";
+import { archiveRecords, syncBudget } from "../security/controls";
+import { MAX_SYNC_RECORDS } from "../../shared/sync-limits";
 import { ORPCError } from "@orpc/server";
 import { and, eq, gt, inArray, sql } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "../database";
 import * as schema from "../database/schema";
 import { authed } from "../middleware/auth";
+import { classifySyncError } from "../sync-diagnostics";
 
 /**
  * 差分同期。
@@ -19,14 +25,15 @@ import { authed } from "../middleware/auth";
  */
 
 const recordInput = z.object({
+  operation:z.enum(["put","delete"]),
   id: z.string().min(1).max(64),
   type: z.enum(["case", "lead", "profile", "template", "meta", "log"]),
   // 1件あたりの上限を置く（1MB ≒ 平文768KB目安）。上限がないと、
   // 巨大な塊を積んで容量を食い潰す使い方ができてしまう。
   // 書類を何度も生成した案件はレコードが大きく育つため、256KB では
   // 途中で同期が恒久的に失敗する（2026-09-15 に再現確認）。
-  ciphertext: z.string().max(1_048_576),
-  iv: z.string().max(64),
+  ciphertext: ciphertextInput,
+  iv: ivInput,
   updatedAtMs: z.number().int(),
   deleted: z.boolean().default(false),
   /**
@@ -34,8 +41,8 @@ const recordInput = z.object({
    * サーバーの現在の seq と一致していれば「相手の変更を見た上での編集」なので競合ではない。
    * 一致しないときだけ、上書きされる側を競合コピーとして返す。
    */
-  baseSeq: z.number().int().default(0),
-});
+  baseSeq: z.number().int().min(0).default(0),
+}).refine(r=>(r.operation==="delete")===r.deleted,"操作種別と削除状態が一致しません");
 
 async function assertDeviceActive(userId: string, deviceId: string) {
   const [d] = await db
@@ -60,23 +67,35 @@ export const sync = {
   push: authed
     .input(
       z.object({
+        proof:z.object({id:z.string().uuid(),signature:z.string().max(200)}).optional(),
         // 端末IDは必須。省略できると、失効させた端末が「端末IDを付けない」だけで
         // 失効判定を通り抜けてしまうため。
         deviceId: z.string().min(4).max(64),
         generation: z.number().int().min(1),
         since: z.number().int().min(0).default(0),
-        records: z.array(recordInput).max(500),
+        records: z.array(recordInput).max(MAX_SYNC_RECORDS, "同期の更新が必要です。ページを再読み込みしてください。"),
       }),
     )
     .handler(async ({ context, input }) => {
       const uid = context.user.id;
+      let stage = "device-check";
+      try {
+      if(context.deviceId!==input.deviceId) throw new ORPCError("FORBIDDEN");
       await assertDeviceActive(uid, input.deviceId);
+      await syncBudget(uid, input, input.records.length);
 
-      return db.transaction(async tx => {
+      stage = "transaction-open";
+      return await db.transaction(async tx => {
+      const [bound]=await tx.select().from(schema.deviceSession).where(eq(schema.deviceSession.sessionId,context.session.id));
+      const [active]=await tx.select().from(schema.device).where(and(eq(schema.device.userId,uid),eq(schema.device.id,input.deviceId)));
+      if(bound?.deviceId!==input.deviceId||bound?.userId!==uid||!active||active.revokedAtMs)throw new ORPCError("FORBIDDEN");
+      if(input.records.length)await verifyWrite(tx,uid,context.session.id,input);
+      stage = "vault-read";
       const [v] = await tx.select().from(schema.vault).where(eq(schema.vault.userId, uid));
       if (!v) throw new ORPCError("NOT_FOUND", { message: "金庫が未作成です" });
       if (v.generation !== input.generation) throw new ORPCError("CONFLICT", { message: "鍵が変更されました。再解錠してください" });
       if (new Set(input.records.map(r => r.id)).size !== input.records.length) throw new ORPCError("BAD_REQUEST");
+      stage = "sequence-read";
       const [maximum] = await tx.select({ value: sql<number>`coalesce(max(${schema.record.seq}), 0)` }).from(schema.record).where(eq(schema.record.userId, uid));
       let nextSeq = Math.max(Date.now(), Number(maximum?.value ?? 0));
 
@@ -91,16 +110,20 @@ export const sync = {
 
       if (input.records.length > 0) {
         const ids = input.records.map((r) => r.id);
+        stage = "existing-records-read";
         const existing = await tx
           .select()
           .from(schema.record)
           .where(and(eq(schema.record.userId, uid), inArray(schema.record.id, ids)));
         const byId = new Map(existing.map((e) => [e.id, e]));
+        await archiveRecords(tx, existing.filter(cur => input.records.some(r => r.id === cur.id && r.baseSeq === cur.seq && r.type === cur.type)), v);
         const now = Date.now();
 
         for (const r of input.records) {
           const cur = byId.get(r.id);
           if (!cur) {
+            if (r.deleted || r.baseSeq !== 0) throw new ORPCError("CONFLICT", { message: "未取得のレコードは上書き・削除できません" });
+            stage = "record-insert";
             await tx.insert(schema.record).values({
               id: r.id,
               userId: uid,
@@ -130,6 +153,7 @@ export const sync = {
                 losingSide: "server",
               });
             }
+            stage = "record-update";
             await tx
               .update(schema.record)
               .set({
@@ -159,6 +183,7 @@ export const sync = {
       }
 
       // pull: since より新しい行
+      stage = "changed-records-read";
       const changed = await tx
         .select()
         .from(schema.record)
@@ -182,10 +207,13 @@ export const sync = {
       }
       const acceptedVersions: Record<string, number> = {};
       if (accepted.length) {
+        stage = "accepted-records-read";
         const saved = await tx.select().from(schema.record).where(and(eq(schema.record.userId, uid), inArray(schema.record.id, accepted)));
         for (const row of saved) acceptedVersions[row.id] = row.seq;
       }
 
+      if(accepted.length)await appendAudit(tx,uid,context.deviceId,"sync:accepted");
+      stage = "transaction-commit";
       return {
         generation: v.generation,
         accepted,
@@ -205,6 +233,17 @@ export const sync = {
         hasMore: fullPage,
       };
       });
+      } catch (error) {
+        if (!(error instanceof ORPCError) || error.status >= 500) {
+          console.error(JSON.stringify({
+            event: "sync_push_failed",
+            stage,
+            recordCount: input.records.length,
+            ...classifySyncError(error),
+          }));
+        }
+        throw error;
+      }
     }),
 
   /** 初回・復旧用の全件取得。失効端末からは取得できない。 */
@@ -217,6 +256,7 @@ export const sync = {
     )
     .handler(async ({ context, input }) => {
       const uid = context.user.id;
+      if(context.deviceId!==input.deviceId) throw new ORPCError("FORBIDDEN");
       await assertDeviceActive(uid, input.deviceId);
       const rows = await db
         .select()
@@ -266,29 +306,7 @@ export const sync = {
   /** 保持期間ポリシーの適用：論理削除から N 日超えた行を物理削除する */
   purgeDeleted: authed
     .input(z.object({ olderThanDays: z.number().int().min(1).max(3650) }))
-    .handler(async ({ context, input }) => {
-      const cutoff = Date.now() - input.olderThanDays * 86400000;
-      const rows = await db
-        .select({ id: schema.record.id })
-        .from(schema.record)
-        .where(
-          and(
-            eq(schema.record.userId, context.user.id),
-            sql`${schema.record.deletedAt} is not null`,
-            sql`${schema.record.deletedAt} < ${cutoff}`,
-          ),
-        );
-      if (rows.length > 0) {
-        await db.delete(schema.record).where(
-          and(
-            eq(schema.record.userId, context.user.id),
-            inArray(
-              schema.record.id,
-              rows.map((r) => r.id),
-            ),
-          ),
-        );
-      }
-      return { purged: rows.length };
+    .handler(async ():Promise<{purged:number}> => {
+      throw new ORPCError("FORBIDDEN",{message:"暗号文の世代保全中のため、自動完全削除は停止しています"});
     }),
 };

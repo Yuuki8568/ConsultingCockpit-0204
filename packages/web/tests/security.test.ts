@@ -7,6 +7,9 @@ import { makeEmptyVaultState, assertUniqueImportIds } from '../src/web/domain/lo
 import { sanitizeSheetCell, encodeCsv } from '../src/web/lib/export/xlsx';
 let push: (...args: any[]) => Promise<any> = async () => { throw new Error('offline fixture'); };
 mock.module('../src/web/lib/api', () => ({ client: { sync: { push: (...a: any[]) => push(...a) }, vault: { rekey: async () => ({}) } } }));
+// Store-only tests stub signing; cryptographic rejection is tested in hardening-core.
+mock.module('../src/web/lib/write-signing',()=>({signSync:async()=>undefined,setupWriteSigning:async()=>{}}));
+mock.module('../src/web/lib/step-up',()=>({authorize:async()=> 'fixture'}));
 const { VaultStore } = await import('../src/web/lib/store/vault-store');
 let held = false;
 Object.defineProperty(globalThis, 'navigator', { configurable: true, value: {
@@ -131,4 +134,47 @@ test('partial corruption also blocks edits without creating tombstones', async (
   await expect(store.unlock(keys.vaultKey,keys.macKey)).rejects.toThrow();
   await expect(store.mutate(s => { s.cases=[]; })).rejects.toThrow();
   expect(await idb.allRecords()).toEqual(original);
+});
+
+test('47 pending rows drain in bounded batches and survive retry and stale pull', async () => {
+  await initialized();
+  await idb.putRecords((await idb.allRecords()).map(r => ({ ...r, dirty: 0 as const })));
+  Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: {
+    getItem: () => 'test-device', setItem: () => {},
+  } });
+  const rows = Array.from({length:47}, (_, i) => ({
+    id: `log:batch-${String(i).padStart(2,'0')}`, type:'log',
+    ciphertext:`local-${i}`, iv:'local-iv', updatedAtMs:1,
+    deleted:false, seq:0, dirty:1 as const,
+  }));
+  await idb.putRecords(rows);
+  const sizes: number[] = [];
+  let fail = false;
+  let scheduled = 0;
+  (store as any).online = true;
+  (store as any).scheduleSync = () => { scheduled++; };
+  push = async (input: any) => {
+    sizes.push(input.records.length);
+    if (fail) throw new Error('temporary failure');
+    return { generation:1, accepted:input.records.map((r:any)=>r.id),
+      acceptedVersions:Object.fromEntries(input.records.map((r:any)=>[r.id,10])),
+      conflicts:[], changed: sizes.length === 1 ? [{...rows[46],ciphertext:'stale-server',seq:5,version:1}] : [],
+      cursor:10, hasMore:false };
+  };
+  // Avoid decoding synthetic rows; this test exercises persistence and batching.
+  (store as any).rebuildFromLocal = async () => {};
+  await store.sync();
+  expect((await idb.dirtyRecords()).length).toBe(39);
+  expect((await idb.getRecord(rows[46]!.id))?.ciphertext).toBe('local-46');
+  expect(scheduled).toBe(1);
+  fail = true; await store.sync();
+  expect((await idb.dirtyRecords()).length).toBe(39);
+  fail = false; for(let i=0;i<5;i++)await store.sync();
+  expect(sizes).toEqual([8,8,8,8,8,8,7]);
+  expect((await idb.dirtyRecords()).length).toBe(0);
+  for (const row of rows) {
+    const saved = await idb.getRecord(row.id);
+    expect(saved?.ciphertext).toBe(row.ciphertext);
+    expect(saved?.seq).toBe(10);
+  }
 });

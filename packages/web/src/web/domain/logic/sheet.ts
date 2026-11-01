@@ -1,3 +1,6 @@
+import { SERVICE_SCOPE_NOTICE } from '../data/service-scope';
+import { serviceScopeBlock } from './service-scope';
+import { legacyNetToGross } from "./pricing";
 // 元アプリ v3 のヒアリングシート生成ロジックを移植
 //
 // 【v3 からの修正】role の値は 'executive' だが質問バンクの weight キーは 'exec' のため、
@@ -146,7 +149,7 @@ export function generateProposalSkeleton(
     : "";
 
   out.cost = stageDef
-    ? `推奨メニュー: ${stageDef.name}\n価格レンジ: ¥${stageDef.lo.toLocaleString()} 〜 ¥${stageDef.std.toLocaleString()}（標準） 〜 ¥${stageDef.hi.toLocaleString()}\n根拠: ${stageDef.why}\n上振れ条件: ${stageDef.upCond}\n月額継続切替時: ${stageDef.monthly}\n\n※ ROI非保証（免責事項第3版 第6条準拠）。成果保証はしない。`
+    ? `推奨メニュー: ${stageDef.name}\n価格レンジ（税込）: ¥${legacyNetToGross(stageDef.lo).toLocaleString()} 〜 ¥${legacyNetToGross(stageDef.std).toLocaleString()}（標準） 〜 ¥${legacyNetToGross(stageDef.hi).toLocaleString()}\n根拠: ${stageDef.why}\n上振れ条件: ${stageDef.upCond}\n月額継続切替時: ${stageDef.monthly}\n\n※ ROI非保証（免責事項第3版 第6条準拠）。成果保証はしない。`
     : "（④単価設計タブで提案価格を確定すると自動反映）";
 
   out.schedule =
@@ -158,7 +161,7 @@ export function generateProposalSkeleton(
           ? "・1ヶ月目: 現状整理・新フロー設計\n・2ヶ月目: パイロット運用＋リーダー育成\n・3ヶ月目: 横展開＋運用台帳完成"
           : "（診断結果に応じて自動生成）";
 
-  out.premise = `■ 前提\n・本提案は受託者の経験と公開情報に基づく仮説です\n・実際の効果はクライアント側の体制・データ品質・継続性に大きく依存します\n\n■ 補助金に関するサポート範囲について\n当方はAI導入計画の設計・伴走支援を専門としています。補助金・助成金については、活用可能性のある制度のご案内と、お客様ご自身が作成される事業計画書への助言までを承ります。申請書類の作成代行は行政書士の業務範囲のため（行政書士法第19条）、必要な場合は提携の行政書士をご紹介します（紹介料はいただきません）。\n\n■ 免責事項（第3版準拠）\n・生成AI出力の正確性は保証しません（ハルシネーション・誤情報の責任を負いません）\n・ROI（投資対効果）は保証しません\n・補助金等の採択・交付決定その他官公署の判断について、いかなる保証も行いません\n・本提案の数字は概算であり、契約締結時に別紙A〜Cで確定します\n・永久契約はありません（初回6ヶ月／更新3ヶ月）\n\n発行: ${profile.yago || "山代業務改善事務所"} / ${profile.name || "山代 悠生"}\n${profile.url || "https://yamashirogyomukaizen.com"}`;
+  out.premise = `■ 前提\n・本提案は受託者の経験と公開情報に基づく仮説です\n・実際の効果はクライアント側の体制・データ品質・継続性に大きく依存します\n\n■ 補助金に関するサポート範囲について\n${SERVICE_SCOPE_NOTICE}\n${serviceScopeBlock(c) ? "【受託判断保留】" + serviceScopeBlock(c) : ""}\n\n■ 免責事項（第3版準拠）\n・生成AI出力の正確性は保証しません。結果の非保証は、合意した提供義務や契約上の責任を免除するものではありません\n・ROI（投資対効果）は保証しません\n・補助金等の採択・交付決定その他官公署の判断について、いかなる保証も行いません\n・本提案の数字は概算であり、契約締結時に別紙A〜Cで確定します\n・契約期間・更新・終了条件は、合意した案件条件票と選択した契約版に従います\n\n発行: ${profile.yago || "山代業務改善事務所"} / ${profile.name || "山代 悠生"}\n${profile.url || "https://yamashirogyomukaizen.com"}`;
 
   return out;
 }
