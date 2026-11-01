@@ -329,3 +329,19 @@
     outline-offset: 3px;
   }
 }
+
+/* Touch targets and narrow screens; keep desktop density unchanged. */
+@media (max-width: 639px) {
+  .panel-head { flex-wrap: wrap; }
+  .panel-body { padding: 12px; min-width: 0; }
+  .field, input[type="password"], input[type="file"], select, textarea { font-size: 16px; }
+  .doc { overflow-wrap: anywhere; }
+}
+@media (pointer: coarse), (max-width: 639px) {
+  .btn, aside button { min-height: 44px; }
+  .field, select { min-height: 44px; }
+  button, a, input, select, textarea { touch-action: manipulation; }
+}
+@media (max-width: 1023px) {
+  #cockpit-navigation { height: 100dvh; padding-bottom: env(safe-area-inset-bottom); }
+}

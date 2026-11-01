@@ -19,11 +19,22 @@ export function PasskeyPanel() {
   };
   return (
     <section className="panel my-4">
-      <div className="panel-body space-y-3">
+      <div className="panel-body flex flex-col items-stretch gap-3 sm:items-start">
         <h3 className="font-semibold">パスキーで重要操作を保護</h3>
         <p className="text-xs text-paper-dim">
           初回はパスキー登録後、管理者が照合番号を別途確認します。承認後にこの端末を登録し、金庫の解錠後に書き込み署名を有効にしてください。
         </p>
+        <details className="w-full text-sm text-paper-dim">
+          <summary className="cursor-pointer py-3">MacとAndroidで使う手順</summary>
+          <ol className="list-decimal space-y-2 pl-5">
+            <li>AndroidのChromeで同じCockpitアカウントにログインします。</li>
+            <li>使える承認済みパスキーがある場合は「本人確認してこの端末を登録」を押します。見つからない場合は、この端末でパスキーを追加登録し、表示された照合番号を管理者へ伝えてください。</li>
+            <li>承認後に端末登録し、再読み込みして同じ金庫のパスフレーズで解錠します。</li>
+            <li>既存の書き込み署名は金庫の解錠後に利用できます。初回設定が必要と表示された場合だけ、下の有効化ボタンを使ってください。</li>
+          </ol>
+          <p className="mt-3">Googleパスワードマネージャーに保存したパスキーは、対応するMac版ChromeとAndroidで同期して利用できます。Appleのパスワードに保存したものがAndroidにも自動で届くとは限りません。</p>
+          <p className="mt-2">端末を替える前に「同期済み」を確認してください。録音・動画原本は自動同期されません。Macの精密文字起こし補助ツールとフォルダーへの自動バックアップはMac側で利用してください。</p>
+        </details>
         <button
           disabled={busy}
           className="btn btn-primary btn-sm"

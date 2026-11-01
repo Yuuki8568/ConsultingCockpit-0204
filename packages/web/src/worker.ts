@@ -35,7 +35,7 @@ export default {
       await jwtVerify(assertion, keys, { issuer: issuer.origin, audience: env.ACCESS_AUD, algorithms: ['RS256'] });
     } catch { return secureResponse(new Response('Access denied', { status: 403 })); }
     try {
-      if(process.env.COCKPIT_READ_ONLY==='1'&&url.pathname.startsWith('/api/rpc/')) {
+      if(String(process.env.COCKPIT_READ_ONLY)==='1'&&url.pathname.startsWith('/api/rpc/')) {
         const allowed=new Set(['ping','vault/status','vault/unlockParams','devices/list','devices/loginHistory','audit/head','audit/list','audit/count','audit/verifyChain','sync/stats','sync/pullAll','passkeys/list','passkeys/registrationOptions','passkeys/register','passkeys/authenticationOptions','passkeys/authenticate','devices/register','writeKeys/current','writeKeys/register']);
         if(!allowed.has(url.pathname.slice('/api/rpc/'.length)))return secureResponse(Response.json({error:'メンテナンス中のため業務データの変更は停止しています'},{status:503}));
       }

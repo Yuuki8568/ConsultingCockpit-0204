@@ -5,6 +5,17 @@ import { operationHash, signingMessage } from "../../shared/operation-proof";
 const aad = "cockpit-write-private-v1";
 export async function setupWriteSigning(key: CryptoKey, generation: number) {
   const current = await client.writeKeys.current();
+  if (current) {
+    if (current.generation !== generation) throw new Error("鍵の世代が変わっています。再読み込みして金庫を解錠してください。");
+    // A second device reuses the vault-encrypted identity instead of rotating it.
+    const privateJwk = await open<JsonWebKey>(key, { ciphertext: current.privateCiphertext, iv: current.privateIv }, aad);
+    const privateKey = await crypto.subtle.importKey("jwk", privateJwk, { name: "ECDSA", namedCurve: "P-256" }, false, ["sign"]);
+    const publicKey = await crypto.subtle.importKey("jwk", JSON.parse(current.publicKey), { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
+    const probe = crypto.getRandomValues(new Uint8Array(32));
+    const signature = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, privateKey, probe);
+    if (!await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, publicKey, signature, probe)) throw new Error("署名鍵を確認できません。管理者に連絡してください。");
+    return;
+  }
   const pair = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, [
     "sign",
     "verify",
@@ -17,7 +28,7 @@ export async function setupWriteSigning(key: CryptoKey, generation: number) {
     privateCiphertext: encrypted.ciphertext,
     privateIv: encrypted.iv,
     generation,
-    expectedVersion: current?.version ?? 0,
+    expectedVersion: 0,
   };
   await client.writeKeys.register({
     ...input,

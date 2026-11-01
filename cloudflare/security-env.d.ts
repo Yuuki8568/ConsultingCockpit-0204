@@ -4,7 +4,7 @@ interface __BaseEnv_SecurityEnv {
 	ASSETS: Fetcher;
 	NODE_ENV: "production";
 	DEPLOYMENT_TARGET: "cloudflare";
-	COCKPIT_READ_ONLY: "1";
+	COCKPIT_READ_ONLY: "0";
 	AUDIT_WITNESS: Fetcher /* consulting-cockpit-audit-witness */;
 }
 declare namespace Cloudflare {
