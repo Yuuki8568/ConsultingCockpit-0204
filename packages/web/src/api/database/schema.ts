@@ -143,3 +143,26 @@ export const rateLimit = sqliteTable("rate_limit", {
   count: integer("count").notNull(),
   lastRequest: integer("last_request").notNull(),
 });
+
+/** Display history must never be the authority for security throttling. */
+export const securityCounter = sqliteTable("security_counter", {
+  key: text("key").primaryKey(), windowStart: integer("window_start").notNull(), count: integer("count").notNull(),
+});
+/** Immutable through normal synchronization; contains encrypted content and old KDF metadata. */
+export const recordRevision = sqliteTable("record_revision", {
+  id: text("id").primaryKey(), userId: text("user_id").notNull(), recordId: text("record_id").notNull(),
+  archivedAtMs: integer("archived_at_ms").notNull(), snapshot: text("snapshot").notNull(),
+}, t => [index("revision_user_record_idx").on(t.userId, t.recordId, t.archivedAtMs)]);
+export const passkeyCredential = sqliteTable("passkey_credential", {
+  id: text("id").primaryKey(), userId: text("user_id").notNull(), publicKey: text("public_key").notNull(),
+  counter: integer("counter").notNull(), fingerprint: text("fingerprint").notNull(), createdAtMs: integer("created_at_ms").notNull(),
+});
+export const securityChallenge = sqliteTable("security_challenge", {
+  id: text("id").primaryKey(), userId: text("user_id").notNull(), sessionId: text("session_id").notNull(),
+  kind: text("kind").notNull(), challenge: text("challenge").notNull(), action: text("action").notNull(),
+  payloadHash: text("payload_hash").notNull(), expiresAtMs: integer("expires_at_ms").notNull(),
+});
+export const stepUpTicket = sqliteTable("step_up_ticket", {
+  id: text("id").primaryKey(), userId: text("user_id").notNull(), sessionId: text("session_id").notNull(),
+  action: text("action").notNull(), payloadHash: text("payload_hash").notNull(), expiresAtMs: integer("expires_at_ms").notNull(),
+});

@@ -7,6 +7,7 @@ import { audit } from "./routes/audit";
 import { devices } from "./routes/devices";
 import { ping } from "./routes/ping";
 import { sync } from "./routes/sync";
+import { passkeys } from "./routes/passkeys";
 import { vault } from "./routes/vault";
 
 // API features are oRPC procedures, one file per feature in ./routes/,
@@ -14,6 +15,7 @@ import { vault } from "./routes/vault";
 // (web: src/web/lib/api.ts, mobile: lib/api.ts).
 export const router = {
   ping,
+  passkeys,
   vault,
   sync,
   devices,

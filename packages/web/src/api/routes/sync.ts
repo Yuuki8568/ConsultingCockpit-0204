@@ -1,3 +1,5 @@
+import { ciphertextInput, ivInput } from "../security/inputs";
+import { archiveRecords, syncBudget } from "../security/controls";
 import { MAX_SYNC_RECORDS } from "../../shared/sync-limits";
 import { ORPCError } from "@orpc/server";
 import { and, eq, gt, inArray, sql } from "drizzle-orm";
@@ -27,8 +29,8 @@ const recordInput = z.object({
   // 巨大な塊を積んで容量を食い潰す使い方ができてしまう。
   // 書類を何度も生成した案件はレコードが大きく育つため、256KB では
   // 途中で同期が恒久的に失敗する（2026-09-15 に再現確認）。
-  ciphertext: z.string().max(1_048_576),
-  iv: z.string().max(64),
+  ciphertext: ciphertextInput,
+  iv: ivInput,
   updatedAtMs: z.number().int(),
   deleted: z.boolean().default(false),
   /**
@@ -75,6 +77,7 @@ export const sync = {
       let stage = "device-check";
       try {
       await assertDeviceActive(uid, input.deviceId);
+      await syncBudget(uid, input, input.records.length);
 
       stage = "transaction-open";
       return await db.transaction(async tx => {
@@ -104,11 +107,13 @@ export const sync = {
           .from(schema.record)
           .where(and(eq(schema.record.userId, uid), inArray(schema.record.id, ids)));
         const byId = new Map(existing.map((e) => [e.id, e]));
+        await archiveRecords(tx, existing.filter(cur => input.records.some(r => r.id === cur.id && r.baseSeq === cur.seq && r.type === cur.type)), v);
         const now = Date.now();
 
         for (const r of input.records) {
           const cur = byId.get(r.id);
           if (!cur) {
+            if (r.deleted || r.baseSeq !== 0) throw new ORPCError("CONFLICT", { message: "未取得のレコードは上書き・削除できません" });
             stage = "record-insert";
             await tx.insert(schema.record).values({
               id: r.id,
