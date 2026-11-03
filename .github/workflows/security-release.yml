@@ -36,6 +36,7 @@ jobs:
       - run: node tests/d1-devices.cjs
       - run: node tests/d1-auth.cjs
       - run: node tests/d1-vault.cjs
+      - run: node tests/d1-migration.cjs
       - run: bun run test:audit-witness
       - run: bun run test:security
       - run: bun run build:web
