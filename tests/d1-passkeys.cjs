@@ -3,9 +3,9 @@ const dep=require('node:module').createRequire(require.resolve('wrangler'));
 const web=require('node:module').createRequire(require('node:path').resolve('packages/web/package.json'));
 const {build}=dep('esbuild'),{Miniflare,convertV4MiniflareOptions}=dep('miniflare'),{chromium}=web('@playwright/test');
 (async()=>{
- process.env.WEBSITE_URL='https://cockpit.example.invalid';process.env.COCKPIT_APPROVED_PASSKEYS='[]';
- const b=await build({stdin:{contents:`export {createD1Passkeys} from './packages/web/src/api/database/d1/passkeys.ts';export {mutateDeviceD1} from './packages/web/src/api/database/d1/devices.ts';export {registerWriteKeyD1,writeChallengeD1} from './packages/web/src/api/database/d1/write-keys.ts';export {pushD1} from './packages/web/src/api/database/d1/sync.ts';export {operationHash,signingMessage} from './packages/web/src/shared/operation-proof.ts'`,resolveDir:process.cwd(),loader:'ts'},bundle:true,platform:'node',format:'esm',write:false});
- const {createD1Passkeys,mutateDeviceD1,operationHash,signingMessage,registerWriteKeyD1,writeChallengeD1,pushD1}=await import('data:text/javascript;base64,'+Buffer.from(b.outputFiles[0].text).toString('base64'));
+ Object.assign(process.env,{NODE_ENV:'production',WEBSITE_URL:'https://cockpit.example.invalid',OWNER_EMAILS:'owner@example.invalid',BETTER_AUTH_SECRET:'isolated-http-test-secret-not-for-production-000000000000',GOOGLE_CLIENT_ID:'synthetic',GOOGLE_CLIENT_SECRET:'synthetic'});process.env.COCKPIT_APPROVED_PASSKEYS='[]';
+ const b=await build({stdin:{contents:`export {publishWitnessesD1} from './packages/web/src/api/database/d1/witness.ts';export {createD1Api} from './packages/web/src/api/database/d1/http.ts';export {mutateDeviceD1} from './packages/web/src/api/database/d1/devices.ts';export {registerWriteKeyD1,writeChallengeD1} from './packages/web/src/api/database/d1/write-keys.ts';export {pushD1} from './packages/web/src/api/database/d1/sync.ts';export {operationHash,signingMessage} from './packages/web/src/shared/operation-proof.ts'`,resolveDir:process.cwd(),loader:'ts'},bundle:true,platform:'node',format:'esm',packages:'external',outfile:'packages/web/tests/.d1-http-test.mjs'});
+ const {publishWitnessesD1,createD1Api,mutateDeviceD1,operationHash,signingMessage,registerWriteKeyD1,writeChallengeD1,pushD1}=await import(require('node:url').pathToFileURL(require('node:path').resolve('packages/web/tests/.d1-http-test.mjs')));
  const mf=new Miniflare(convertV4MiniflareOptions({modules:true,script:'export default {fetch(){return new Response("test")}}',compatibilityDate:'2026-10-17',d1Databases:['DB']}));
  let browser;
  try{
@@ -15,7 +15,21 @@ const {build}=dep('esbuild'),{Miniflare,convertV4MiniflareOptions}=dep('miniflar
  const now=Date.now(),ctx={user:{id:'owner',email:'owner@example.invalid'},session:{id:'session'}},p={userId:'owner',sessionId:'session'};
  await run('INSERT INTO user(id,name,email,email_verified,created_at,updated_at) VALUES (?,?,?,1,?,?)','owner','test',ctx.user.email,now,now);
  await run('INSERT INTO session(id,expires_at,token,created_at,updated_at,user_id) VALUES (?,?,?,?,?,?)','session',now+3600000,'synthetic',now,now,'owner');
- const keys=createD1Passkeys(db,ctx);
+ let anchor={seq:0,hash:'GENESIS'};
+ const witness={async fetch(request){if(request.method==='GET')return Response.json(anchor);const value=await request.json();anchor={seq:value.seq,hash:value.hash};return Response.json({ok:true});}};
+ const app=createD1Api(db,witness);
+ const signatureCookie=require('node:crypto').createHmac('sha256',process.env.BETTER_AUTH_SECRET).update('synthetic').digest('base64');
+ const cookie='__Secure-better-auth.session_token='+encodeURIComponent('synthetic.'+signatureCookie);
+ const headers={origin:process.env.WEBSITE_URL,cookie,'content-type':'application/json'};
+ async function rpc(path,input){const r=await app.request('/api/rpc/'+path,{method:'POST',headers,body:JSON.stringify({json:input??null})});if(!r.ok)throw Error('RPC '+path+' '+r.status);return (await r.json()).json;}
+ const keys=Object.fromEntries(['list','registrationOptions','register','authenticationOptions','authenticate'].map(name=>[name,input=>rpc('passkeys/'+name,input)]));
+ assert.equal((await app.request('/api/rpc/vault/status',{method:'POST',headers:{'content-type':'application/json'},body:'{"json":null}'})).status,401);
+ assert.equal((await app.request('/api/rpc/vault/status',{method:'POST',headers:{...headers,origin:'https://evil.invalid'},body:'{"json":null}'})).status,403);
+ assert.equal((await rpc('vault/status')).exists,false);
+ assert.equal((await app.request('/api/rpc/devices/register',{method:'POST',headers,body:'{"json":{"id":"x"}}'})).status,400);
+ const maintenance=createD1Api(db,undefined,true);
+ assert.equal((await maintenance.request('/api/rpc/vault/eraseAll',{method:'POST',headers,body:'{"json":{"confirm":"ERASE"}}'})).status,503);
+
  browser=await chromium.launch({headless:true});const context=await browser.newContext(),page=await context.newPage();
  await page.route('https://cockpit.example.invalid/**',r=>r.fulfill({status:200,contentType:'text/html',body:'<title>Synthetic D1 WebAuthn test</title>'}));
  await page.goto(process.env.WEBSITE_URL);
@@ -42,7 +56,7 @@ const {build}=dep('esbuild'),{Miniflare,convertV4MiniflareOptions}=dep('miniflar
  const a=await assertion(),ticket=await keys.authenticate(a);
  await assert.rejects(keys.authenticate(a));
  await assert.rejects(mutateDeviceD1(db,p,action,{...input,label:'tampered',authorization:ticket.id}));
- await mutateDeviceD1(db,p,action,{...input,authorization:ticket.id});
+ await rpc('devices/register',{...input,authorization:ticket.id});
  assert.equal(await one('SELECT id FROM step_up_ticket WHERE id=?',ticket.id),null);
  const bad=await assertion();bad.response.response.signature=Buffer.alloc(64).toString('base64url');await assert.rejects(keys.authenticate(bad));
  const before=await one('SELECT counter FROM passkey_credential');
@@ -58,16 +72,34 @@ const {build}=dep('esbuild'),{Miniflare,convertV4MiniflareOptions}=dep('miniflar
  await assert.rejects(registerWriteKeyD1(db,p,keyInput));
  const keyOptions=await keys.authenticationOptions({action:'write-key:register',payloadHash:await operationHash(keyInput)});
  const keyTicket=await keys.authenticate({id:keyOptions.id,response:await response(keyOptions.options,false)});
- await registerWriteKeyD1(db,p,{...keyInput,authorization:keyTicket.id});
+ await rpc('writeKeys/register',{...keyInput,authorization:keyTicket.id});
  await assert.rejects(registerWriteKeyD1(db,p,{...keyInput,authorization:keyTicket.id}));
  const push={deviceId:input.id,generation:1,since:0,records:[{operation:'put',id:'case-one',type:'case',ciphertext:cipher,iv,updatedAtMs:now,deleted:false,baseSeq:0}]};
- const write=await writeChallengeD1(db,p,{deviceId:input.id,payloadHash:await operationHash(push)});
+ const write=await rpc('writeKeys/challenge',{deviceId:input.id,payloadHash:await operationHash(push)});
  const signature=Buffer.from(await crypto.subtle.sign({name:'ECDSA',hash:'SHA-256'},pair.privateKey,new TextEncoder().encode(signingMessage(write)))).toString('base64');
  const signed={...push,proof:{id:write.id,signature}};
- assert.deepEqual((await pushD1(db,{...p,deviceId:input.id},signed)).accepted,['case-one']);
+ assert.deepEqual((await rpc('sync/push',signed)).accepted,['case-one']);
  await assert.rejects(pushD1(db,{...p,deviceId:input.id},signed));
+ assert.equal((await rpc('sync/pullAll',{deviceId:input.id,after:0})).records[0].ciphertext,cipher);
+ assert.equal((await rpc('sync/stats')).byType.case,1);
+ assert.equal((await rpc('devices/list'))[0].id,input.id);
+ await rpc('devices/logLogin',{kind:'unlock_ok',deviceId:'forged-device'});
+ assert.equal((await rpc('devices/loginHistory',{limit:10}))[0].deviceId,input.id);
+ await rpc('vault/unlockParams');
+ await rpc('devices/clearLoginHistory');
+ assert.equal((await rpc('devices/loginHistory',{limit:10})).length,0);
+ assert.equal((await one('SELECT count FROM security_counter WHERE key=?','unlock:owner')).count,1);
+ const entry=await rpc('audit/append',{action:'test',atMs:0,deviceId:'forged-device',payloadCiphertext:cipher,payloadIv:iv});
+ const events=await rpc('audit/list',{limit:10,offset:0});assert.equal(events[0].seq,entry.seq);assert.equal(events[0].deviceId,input.id);assert.ok(events[0].atMs>now-1000);
+ assert.equal((await rpc('audit/count')).count,events.length);
+ assert.equal((await rpc('audit/verifyChain')).ok,false);
+ await publishWitnessesD1(db,witness);assert.equal((await rpc('audit/verifyChain')).ok,true);
+ await run("UPDATE audit_event SET payload_iv='tampered' WHERE seq=?",entry.seq);assert.equal((await rpc('audit/verifyChain')).ok,false);
+ await run('UPDATE audit_event SET payload_iv=? WHERE seq=?',iv,entry.seq);
+ await assert.rejects(rpc('audit/truncateOldest',{keepLatest:100}));await assert.rejects(rpc('sync/purgeDeleted',{olderThanDays:1}));
+ const oversize=await app.request('/api/rpc/sync/push',{method:'POST',headers,body:JSON.stringify({json:'x'.repeat(4*1024*1024)})});assert.equal(oversize.status,413);
  const revoked=await assertion();await run('UPDATE device SET revoked_at_ms=? WHERE id=?',now,input.id);await assert.rejects(keys.authenticate(revoked));
  assert.equal((await one('SELECT count(*) n FROM step_up_ticket')).n,0);
- console.log('PASS D1 virtual WebAuthn: registration, separate approval, assertion verification, scoped device registration ticket, replay/tamper refusal, counter rollback, revoked-session rejection');
- }finally{if(browser)await browser.close();await mf.dispose()}
+ console.log('PASS D1 HTTP and virtual WebAuthn: registration, separate approval, assertion verification, scoped device registration ticket, replay/tamper refusal, counter rollback, revoked-session rejection');
+ }finally{if(browser)await browser.close();await mf.dispose();fs.rmSync('packages/web/tests/.d1-http-test.mjs',{force:true})}
 })().catch(e=>{console.error(e);process.exitCode=1});

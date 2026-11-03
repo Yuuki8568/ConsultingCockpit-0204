@@ -1,5 +1,5 @@
 /** D1 candidate witness publisher. Not attached to the production cron. */
-import { and, eq, gt } from "drizzle-orm";
+import { and, eq, gt, sql } from "drizzle-orm";
 import type { D1Database } from "@cloudflare/workers-types";
 import { drizzle } from "drizzle-orm/d1";
 import * as s from "../schema";
@@ -38,7 +38,13 @@ export async function publishWitnessesD1(d1: D1Database, service: WitnessService
     const rows = await db
       .select()
       .from(s.auditEvent)
-      .where(and(eq(s.auditEvent.userId, head.userId), gt(s.auditEvent.seq, prior.seq)))
+      .where(
+        and(
+          eq(s.auditEvent.userId, head.userId),
+          gt(s.auditEvent.seq, prior.seq),
+          sql`(SELECT coalesce(sum(length(payload_ciphertext)),0) FROM (SELECT payload_ciphertext FROM audit_event WHERE user_id=${head.userId} AND seq>${prior.seq} ORDER BY seq LIMIT 1000))<=16777216`,
+        ),
+      )
       .orderBy(s.auditEvent.seq)
       .limit(1000);
     let seq = prior.seq,

@@ -4,11 +4,13 @@ import { eq, desc } from "drizzle-orm";
 import * as s from "../schema";
 import { auditHash } from "../../security/audit";
 /** Compile append-only audit CAS mutations; caller commits with its business mutations. */
-export async function auditPlanD1(
+export async function compileAuditD1(
   d1: D1Database,
   uid: string,
   deviceId: string | null,
   action: string,
+  payloadCiphertext: string | null = null,
+  payloadIv: string | null = null,
 ) {
   const q = drizzle(d1, { schema: s });
   const [[head], [tail]] = await q.batch([
@@ -33,8 +35,8 @@ export async function auditPlanD1(
     action,
     atMs: Date.now(),
     deviceId,
-    payloadCiphertext: null,
-    payloadIv: null,
+    payloadCiphertext,
+    payloadIv,
     prevHash: head?.hash ?? "GENESIS",
   };
   const hash = await auditHash(event),
@@ -42,7 +44,7 @@ export async function auditPlanD1(
       .insert(s.auditEvent)
       .values({ ...event, hash })
       .toSQL();
-  return [
+  const ops = [
     {
       statement: head
         ? d1
@@ -55,4 +57,14 @@ export async function auditPlanD1(
     },
     { statement: d1.prepare(insert.sql).bind(...insert.params), expectedChanges: 1 },
   ];
+  return { ops, seq: event.seq, hash };
+}
+
+export async function auditPlanD1(
+  d1: D1Database,
+  uid: string,
+  deviceId: string | null,
+  action: string,
+) {
+  return (await compileAuditD1(d1, uid, deviceId, action)).ops;
 }
