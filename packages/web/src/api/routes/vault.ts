@@ -35,9 +35,10 @@ export const vault = {
       .select()
       .from(schema.vault)
       .where(eq(schema.vault.userId, context.user.id));
-    if (!v) return { exists: false as const };
+    if (!v) return { exists: false as const, storageBackend: "libsql" as "libsql" | "d1" };
     return {
       exists: true as const,
+      storageBackend: "libsql" as "libsql" | "d1",
       kdfAlgo: v.kdfAlgo,
       kdfIterations: v.kdfIterations,
       generation: v.generation,

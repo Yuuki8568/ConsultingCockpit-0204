@@ -26,6 +26,7 @@ const {build}=dep('esbuild'),{Miniflare,convertV4MiniflareOptions}=dep('miniflar
  assert.equal((await app.request('/api/rpc/vault/status',{method:'POST',headers:{'content-type':'application/json'},body:'{"json":null}'})).status,401);
  assert.equal((await app.request('/api/rpc/vault/status',{method:'POST',headers:{...headers,origin:'https://evil.invalid'},body:'{"json":null}'})).status,403);
  assert.equal((await rpc('vault/status')).exists,false);
+ assert.equal((await rpc('vault/status')).storageBackend,'d1');
  assert.equal((await app.request('/api/rpc/devices/register',{method:'POST',headers,body:'{"json":{"id":"x"}}'})).status,400);
  const maintenance=createD1Api(db,undefined,true);
  assert.equal((await maintenance.request('/api/rpc/vault/eraseAll',{method:'POST',headers,body:'{"json":{"confirm":"ERASE"}}'})).status,503);

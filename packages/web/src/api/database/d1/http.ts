@@ -81,13 +81,14 @@ export function createD1Api(d1: D1Database, witness?: WitnessService, readOnly =
         return v
           ? {
               exists: true,
+              storageBackend: "d1" as const,
               kdfAlgo: v.kdfAlgo,
               kdfIterations: v.kdfIterations,
               generation: v.generation,
               createdAtMs: v.createdAtMs,
               updatedAtMs: v.updatedAtMs,
             }
-          : { exists: false };
+          : { exists: false, storageBackend: "d1" as const };
       }),
       unlockParams: authed.handler(({ context }) => unlockParamsD1(d1, principal(context))),
       create: authed

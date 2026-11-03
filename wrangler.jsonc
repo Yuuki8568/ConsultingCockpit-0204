@@ -31,7 +31,9 @@
       "vars": {
         "NODE_ENV": "production",
         "DEPLOYMENT_TARGET": "cloudflare",
-        "COCKPIT_READ_ONLY": "0"
+        "COCKPIT_READ_ONLY": "0",
+        "COCKPIT_DATABASE_BACKEND": "libsql",
+        "COCKPIT_D1_MANIFEST_SHA256": "pending-migration"
       },
       "services": [
         {
@@ -49,7 +51,14 @@
         "binding": "ASSETS",
         "run_worker_first": true,
         "not_found_handling": "single-page-application"
-      }
+      },
+      "d1_databases": [
+        {
+          "binding": "COCKPIT_D1",
+          "database_name": "consulting-cockpit-db",
+          "database_id": "be004feb-0f63-4d9d-b0eb-1c275949081c"
+        }
+      ]
     },
     "production": {
       "name": "consulting-cockpit-production",

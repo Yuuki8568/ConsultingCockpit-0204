@@ -6,6 +6,8 @@ import type { Client, Transaction } from "@libsql/client";
 import type { D1Database } from "@cloudflare/workers-types";
 import { getTableConfig } from "drizzle-orm/sqlite-core";
 import * as s from "../schema";
+import { auditHash } from "../../security/audit";
+import { witnessHeadD1, type WitnessService } from "./witness";
 import { atomicCheckedBatch } from "../../../../../../cloudflare/d1/atomic-batch";
 
 // Foreign-key parents first. Identifiers are exclusively schema-owned, never user SQL.
@@ -121,27 +123,84 @@ async function collect(tx: Transaction, owners: ReadonlySet<string>): Promise<Sn
   return snapshots;
 }
 
-/** No UPDATE/DELETE is ever executed against source or existing destination records.
- * Failure after the import leaves a detached, unverified destination: never auto-cut over.
- */
-export async function copyToEmptyD1(
-  source: Client,
-  destination: D1Database,
-  options: { maintenanceConfirmed: boolean; ownerEmails: string[] },
-) {
-  if (!options.maintenanceConfirmed || !options.ownerEmails.length)
-    throw Error("MAINTENANCE_REQUIRED");
+async function readSource(source: Client, owners: ReadonlySet<string>) {
   const tx = await source.transaction("read");
-  let snapshots: Snapshot[];
   try {
-    snapshots = await collect(tx, new Set(options.ownerEmails.map((x) => x.trim().toLowerCase())));
+    const snapshots = await collect(tx, owners);
     await tx.commit();
+    return snapshots;
   } catch (error) {
     await tx.rollback();
     throw error;
   } finally {
     tx.close();
   }
+}
+
+/** Verify the exact snapshot to be copied, including independently stored tail anchors. */
+async function verifyAudit(snapshots: Snapshot[], witness: WitnessService) {
+  if (!witness) throw Error("WITNESS_UNAVAILABLE");
+  const rows = (name: string) => {
+    const table = snapshots.find((t) => t.name === name)!;
+    return table.rows.map((r) => Object.fromEntries(table.columns.map((c, i) => [c, r[i]])));
+  };
+  const users = new Set(rows("user").map((r) => String(r.id)));
+  const events = rows("audit_event"),
+    heads = rows("audit_head");
+  if ([...events, ...heads].some((r) => !users.has(String(r.user_id))))
+    throw Error("AUDIT_OWNER_MISMATCH");
+  for (const uid of users) {
+    const chain = events
+      .filter((r) => r.user_id === uid)
+      .sort((a, b) => Number(a.seq) - Number(b.seq));
+    let seq = 0,
+      hash = "GENESIS";
+    for (const r of chain) {
+      if (r.seq !== seq + 1 || r.prev_hash !== hash) throw Error("AUDIT_CHAIN_INVALID");
+      const computed = await auditHash({
+        hashVersion: Number(r.hash_version),
+        userId: uid,
+        seq: Number(r.seq),
+        action: String(r.action),
+        atMs: Number(r.at_ms),
+        deviceId: r.device_id === null ? null : String(r.device_id),
+        payloadCiphertext: r.payload_ciphertext === null ? null : String(r.payload_ciphertext),
+        payloadIv: r.payload_iv === null ? null : String(r.payload_iv),
+        prevHash: hash,
+      });
+      if (computed !== r.hash) throw Error("AUDIT_CHAIN_INVALID");
+      seq = Number(r.seq);
+      hash = computed;
+    }
+    const head = heads.find((r) => r.user_id === uid);
+    if ((head?.seq ?? 0) !== seq || (head?.hash ?? "GENESIS") !== hash)
+      throw Error("AUDIT_HEAD_MISMATCH");
+    let anchor;
+    try {
+      anchor = await witnessHeadD1(witness, uid);
+    } catch {
+      throw Error("WITNESS_UNAVAILABLE");
+    }
+    if (anchor.seq === 0) {
+      if (anchor.hash !== "GENESIS") throw Error("AUDIT_WITNESS_MISMATCH");
+    } else if (chain.find((r) => r.seq === anchor.seq)?.hash !== anchor.hash)
+      throw Error("AUDIT_WITNESS_MISMATCH");
+  }
+}
+
+/** No UPDATE/DELETE is ever executed against source or existing destination records.
+ * Failure after the import leaves a detached, unverified destination: never auto-cut over.
+ */
+export async function copyToEmptyD1(
+  source: Client,
+  destination: D1Database,
+  options: { maintenanceConfirmed: boolean; ownerEmails: string[]; witness: WitnessService },
+) {
+  if (!options.maintenanceConfirmed || !options.ownerEmails.length)
+    throw Error("MAINTENANCE_REQUIRED");
+  const owners = new Set(options.ownerEmails.map((x) => x.trim().toLowerCase()));
+  const snapshots = await readSource(source, owners);
+  await verifyAudit(snapshots, options.witness);
   // Schema and emptiness check includes tables with zero rows in the source.
   const metadata = await destination.batch<{ name: string }>(
     definitions.map((d) => destination.prepare(`PRAGMA table_info(${quote(d.name)})`)),
@@ -198,6 +257,11 @@ export async function copyToEmptyD1(
   }
   if ((await destination.prepare("PRAGMA foreign_key_check").all()).results.length)
     throw Error("DESTINATION_FOREIGN_KEY_MISMATCH");
+  // Detect in-flight old Worker/cron writes after the first snapshot. Maintenance is
+  // still required: this comparison does not replace the external write freeze.
+  const after = await readSource(source, owners);
+  if (after.some((table, i) => table.digest !== snapshots[i].digest)) throw Error("SOURCE_CHANGED");
+  await verifyAudit(after, options.witness);
   const manifest = snapshots.map((t) => ({ table: t.name, rows: t.rows.length, sha256: t.digest }));
   return {
     verified: true as const,

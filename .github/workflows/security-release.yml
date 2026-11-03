@@ -30,6 +30,7 @@ jobs:
       - run: bun run test:contracts
       - run: bun test security-ops/hardening-maintenance.test.ts
       - run: bun run test:hardening
+      - run: bun test packages/web/tests/worker-backend.test.ts packages/web/tests/cloudflare.test.ts
       - run: cd packages/web && bun test tests/resume-sync.test.ts
       - run: node tests/d1-atomic-batch.cjs
       - run: node tests/d1-signed-sync.cjs
