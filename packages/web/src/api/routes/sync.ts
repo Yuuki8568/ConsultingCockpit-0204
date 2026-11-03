@@ -1,8 +1,7 @@
 import { appendAudit } from "../security/audit";
 import { verifyWrite } from "./write-keys";
-import { ciphertextInput, ivInput } from "../security/inputs";
+import { syncInput } from "../security/sync-input";
 import { archiveRecords, syncBudget } from "../security/controls";
-import { MAX_SYNC_RECORDS } from "../../shared/sync-limits";
 import { ORPCError } from "@orpc/server";
 import { and, eq, gt, inArray, sql } from "drizzle-orm";
 import { z } from "zod";
@@ -24,25 +23,6 @@ import { classifySyncError } from "../sync-diagnostics";
  * - サーバーは ciphertext を一切解釈しない。中身が何かは分からない。
  */
 
-const recordInput = z.object({
-  operation:z.enum(["put","delete"]),
-  id: z.string().min(1).max(64),
-  type: z.enum(["case", "lead", "profile", "template", "meta", "log"]),
-  // 1件あたりの上限を置く（1MB ≒ 平文768KB目安）。上限がないと、
-  // 巨大な塊を積んで容量を食い潰す使い方ができてしまう。
-  // 書類を何度も生成した案件はレコードが大きく育つため、256KB では
-  // 途中で同期が恒久的に失敗する（2026-09-15 に再現確認）。
-  ciphertext: ciphertextInput,
-  iv: ivInput,
-  updatedAtMs: z.number().int(),
-  deleted: z.boolean().default(false),
-  /**
-   * この編集が元にしたサーバー版の seq。
-   * サーバーの現在の seq と一致していれば「相手の変更を見た上での編集」なので競合ではない。
-   * 一致しないときだけ、上書きされる側を競合コピーとして返す。
-   */
-  baseSeq: z.number().int().min(0).default(0),
-}).refine(r=>(r.operation==="delete")===r.deleted,"操作種別と削除状態が一致しません");
 
 async function assertDeviceActive(userId: string, deviceId: string) {
   const [d] = await db
@@ -66,15 +46,7 @@ export const sync = {
   /** push + pull を1往復で行う */
   push: authed
     .input(
-      z.object({
-        proof:z.object({id:z.string().uuid(),signature:z.string().max(200)}).optional(),
-        // 端末IDは必須。省略できると、失効させた端末が「端末IDを付けない」だけで
-        // 失効判定を通り抜けてしまうため。
-        deviceId: z.string().min(4).max(64),
-        generation: z.number().int().min(1),
-        since: z.number().int().min(0).default(0),
-        records: z.array(recordInput).max(MAX_SYNC_RECORDS, "同期の更新が必要です。ページを再読み込みしてください。"),
-      }),
+      syncInput,
     )
     .handler(async ({ context, input }) => {
       const uid = context.user.id;

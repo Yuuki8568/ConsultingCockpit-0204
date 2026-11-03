@@ -1,3 +1,4 @@
+import { rekeyInput } from "../security/rekey-input";
 import { appendAudit } from "../security/audit";
 import { requireStepUp } from "../security/step-up";
 import { ciphertextInput, ivInput, saltInput } from "../security/inputs";
@@ -123,17 +124,7 @@ export const vault = {
    * 途中で失敗して読めなくなることを避けるため、1トランザクションで置き換える。
    */
   rekey: authed
-    .input(z.object({
-      authorization: z.string().uuid().optional(),
-      writeKey:z.object({privateCiphertext:ciphertextInput,privateIv:ivInput,expectedVersion:z.number().int().positive()}).optional(),
-      expectedGeneration: z.number().int().min(1),
-      kdfSalt: saltInput,
-      kdfIterations: z.number().int().min(100_000).max(2_000_000),
-      verifierCiphertext: ciphertextInput,
-      verifierIv: ivInput,
-      records: z.array(z.object({ id: z.string().max(200), ciphertext: ciphertextInput,
-        iv: ivInput, baseSeq: z.number().int().min(0) })).max(5000),
-    }))
+    .input(rekeyInput)
     .handler(async ({ context, input }) => db.transaction(async tx => {
       const uid = context.user.id;
       await requireStepUp(tx,uid,context.session.id,"vault:rekey",input,input.authorization);

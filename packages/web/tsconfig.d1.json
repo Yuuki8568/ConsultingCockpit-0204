@@ -1,0 +1,1 @@
+{"extends":"./tsconfig.node.json","include":["src/api/database/d1","tests/generate-d1-schema.ts"]}
