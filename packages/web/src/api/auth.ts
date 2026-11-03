@@ -5,10 +5,10 @@ import { db, databaseContext } from "./database";
 import { isOwnerEmail } from "./owner";
 import { allowedOrigins } from "./origins";
 
-export function createAuth() { return betterAuth({
+export function createAuth(database: Parameters<typeof drizzleAdapter>[0] = db) { return betterAuth({
   basePath: "/api/auth",
   baseURL: process.env.WEBSITE_URL,
-  database: drizzleAdapter(db, { provider: "sqlite" }),
+  database: drizzleAdapter(database, { provider: "sqlite" }),
   // Independent Google OAuth only; verified owners may create their new account.
   emailAndPassword: { enabled: false },
   socialProviders: { google: { clientId: process.env.GOOGLE_CLIENT_ID!, clientSecret: process.env.GOOGLE_CLIENT_SECRET! } },

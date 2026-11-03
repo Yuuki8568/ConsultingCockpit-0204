@@ -33,6 +33,9 @@ jobs:
       - run: cd packages/web && bun test tests/resume-sync.test.ts
       - run: node tests/d1-atomic-batch.cjs
       - run: node tests/d1-signed-sync.cjs
+      - run: node tests/d1-devices.cjs
+      - run: node tests/d1-auth.cjs
+      - run: node tests/d1-vault.cjs
       - run: bun run test:audit-witness
       - run: bun run test:security
       - run: bun run build:web
@@ -41,6 +44,7 @@ jobs:
           VITE_RUNABLE_AUTH_ISSUER: ${{ vars.VITE_RUNABLE_AUTH_ISSUER }}
           VITE_WEBSITE_URL: ${{ vars.VITE_WEBSITE_URL }}
       - run: node packages/web/node_modules/@playwright/test/cli.js install --with-deps chromium
+      - run: node tests/d1-passkeys.cjs
       - run: node tests/mobile.browser.cjs
       - run: bun run test:automatic-backup
       - run: bun run test:contract-ui
