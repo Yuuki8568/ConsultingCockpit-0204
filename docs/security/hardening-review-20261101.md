@@ -1,4 +1,6 @@
-# Cockpit security hardening — review candidate, not deployed
+# Cockpit security hardening — deployment record and historical review
+
+> Status correction (2026-11-03): PR #14 and #15 are deployed. Read-only mode was lifted after owner-confirmed passkey/signing setup. Older candidate/deployment instructions below are historical; they are not current rollout status. See `remaining-work-20261103.md`.
 
 This branch rebuilds work lost from the previous execution environment. Production baseline is repository commit `99900e501e42951aa7b05e543f56eebe1722559f`. The active Worker version was read as `2dced962-5d1a-4eb2-9f02-46f6a75f9f02` at 100%. This confirms deployment metadata, not byte-for-byte agreement with production source. Production source was not retrieved.
 

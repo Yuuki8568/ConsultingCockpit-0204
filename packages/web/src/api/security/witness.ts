@@ -48,6 +48,13 @@ export async function publishWitnesses() {
       seq = r.seq;
       hash = r.hash;
     }
+    // The head is read before the page: concurrent appends may extend it, but
+    // a short page may never stop before the head we already observed.
+    if (seq < head.seq && rows.length < 1000) throw new Error("Audit tail missing");
+    const observedHead = rows.find(r => r.seq === head.seq);
+    if ((observedHead && observedHead.hash !== head.hash) ||
+        (head.seq === prior.seq && head.hash !== prior.hash))
+      throw new Error("Audit head mismatch");
     if (seq === prior.seq) continue;
     const res = await service.fetch(
       new Request("https://witness/checkpoint", {
