@@ -305,6 +305,8 @@ export async function pushD1(d1: D1Database, principal: SyncPrincipal, raw: unkn
       acceptedVersions[r.id] = old.seq;
     }
   }
+  // Never accept a write that makes the next request exceed this candidate's bounds.
+  if (byId.size > MAX_SNAPSHOT_ROWS || new TextEncoder().encode(JSON.stringify([...byId.values()])).byteLength > MAX_SNAPSHOT_BYTES) fail("PAYLOAD_TOO_LARGE");
   if (accepted.length) {
     const row = {
       id: crypto.randomUUID(),

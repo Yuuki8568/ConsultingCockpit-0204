@@ -86,6 +86,10 @@ const {build}=dep('esbuild'),{Miniflare,convertV4MiniflareOptions}=dep('miniflar
  await assert.rejects(rekeyD1(db,principal,change));
  assert.equal((await rekeyD1(db,principal,await authorized(keyChange))).generation,2);
  assert.equal((await one('SELECT count(*) n FROM record WHERE user_id=?','outsider')).n,0);
+ const fill=Array.from({length:999},(_,i)=>db.prepare('INSERT INTO record(id,user_id,type,ciphertext,iv,updated_at_ms,version,seq) VALUES (?,?,?,?,?,?,1,?)').bind('limit-'+i,'owner','case',cipher(4),iv,now,100+i));await db.batch(fill);
+ const over=await signed({...request([record('over-limit')]),generation:2});await assert.rejects(pushD1(db,principal,over));
+ assert.equal((await one('SELECT count(*) n FROM record WHERE user_id=?','owner')).n,1000);
+ assert.ok(await one('SELECT id FROM security_challenge WHERE id=?',over.proof.id));
  assert.equal((await one('SELECT count(*) n FROM cockpit_atomic_assertion')).n,0);
  console.log('PASS D1 signed sync: insert, ciphertext preservation, unsigned/tamper/replay refusal, CAS race, encrypted revision, conflict, audit failure rollback, tenant isolation, commit-time revocation, generation; rekey ticket reuse, atomic key envelope, rollback and concurrent edit refusal');
  }finally{await mf.dispose()}
