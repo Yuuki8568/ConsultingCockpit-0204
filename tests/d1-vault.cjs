@@ -3,8 +3,8 @@ const assert=require('node:assert/strict'),fs=require('node:fs');
 const dep=require('node:module').createRequire(require.resolve('wrangler'));
 const {build}=dep('esbuild'),{Miniflare,convertV4MiniflareOptions}=dep('miniflare');
 (async()=>{
- const b=await build({stdin:{contents:`export {mutateVaultD1,unlockParamsD1} from './packages/web/src/api/database/d1/vault.ts';export {operationHash} from './packages/web/src/shared/operation-proof.ts'`,resolveDir:process.cwd(),loader:'ts'},bundle:true,platform:'node',format:'esm',write:false});
- const {mutateVaultD1,unlockParamsD1,operationHash}=await import('data:text/javascript;base64,'+Buffer.from(b.outputFiles[0].text).toString('base64'));
+ const b=await build({stdin:{contents:`export {mutateVaultD1,unlockParamsD1} from './packages/web/src/api/database/d1/vault.ts';export {publishWitnessesD1} from './packages/web/src/api/database/d1/witness.ts';export {operationHash} from './packages/web/src/shared/operation-proof.ts'`,resolveDir:process.cwd(),loader:'ts'},bundle:true,platform:'node',format:'esm',write:false});
+ const {mutateVaultD1,unlockParamsD1,operationHash,publishWitnessesD1}=await import('data:text/javascript;base64,'+Buffer.from(b.outputFiles[0].text).toString('base64'));
  const mf=new Miniflare(convertV4MiniflareOptions({modules:true,script:'export default {fetch(){return new Response("test")}}',compatibilityDate:'2026-10-17',d1Databases:['DB']}));
  try{
  const db=await mf.getD1Database('DB');
@@ -44,6 +44,13 @@ const {build}=dep('esbuild'),{Miniflare,convertV4MiniflareOptions}=dep('miniflar
  assert.equal((await one('SELECT count(*) n FROM login_event')).n,2);
  assert.equal((await one('SELECT count(*) n FROM session')).n,1);
  assert.equal((await one('SELECT count(*) n FROM cockpit_atomic_assertion')).n,0);
+ let anchor={seq:0,hash:'GENESIS'},posts=0;
+ const witness={async fetch(request){if(request.method==='GET')return Response.json(anchor);const b=await request.json();assert.equal(b.previousSeq,anchor.seq);assert.equal(b.previousHash,anchor.hash);anchor={seq:b.seq,hash:b.hash};posts++;return Response.json({ok:true});}};
+ await publishWitnessesD1(db,witness);assert.equal(posts,1);assert.equal(anchor.seq,2);
+ await publishWitnessesD1(db,witness);assert.equal(posts,1);
+ await run('DELETE FROM audit_event WHERE seq=2');await assert.rejects(publishWitnessesD1(db,witness));assert.equal(posts,1);
+ anchor={seq:0,hash:'GENESIS'};await assert.rejects(publishWitnessesD1(db,witness));assert.equal(posts,1); // missing short tail must not be newly anchored
+ await run("UPDATE audit_event SET payload_iv='tampered' WHERE seq=1");await assert.rejects(publishWitnessesD1(db,witness));
  console.log('PASS D1 vault: protected creation/erasure, replay refusal, concurrent unlock limit, history deletion resistance, refusal logging, erase rollback, preserved security state');
  }finally{await mf.dispose()}
 })().catch(e=>{console.error(e);process.exitCode=1});
