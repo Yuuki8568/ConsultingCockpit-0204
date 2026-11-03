@@ -64,6 +64,15 @@ test("migration, persistent limits and transactional encrypted revisions", async
           return new Response(null, { status: 200 });
         },
       };
+      // A suffix removed before its first witness must not be published as valid.
+      await db.delete(schema.auditEvent).where(eq(schema.auditEvent.id, auditRows[1].id));
+      await expect(databaseContext.run({ db, witness }, publishWitnesses)).rejects.toThrow("Audit tail missing");
+      expect(anchor.seq).toBe(0);
+      await db.insert(schema.auditEvent).values(auditRows[1]);
+      await db.update(schema.auditHead).set({hash:"f".repeat(64)}).where(eq(schema.auditHead.userId,"audit-user"));
+      await expect(databaseContext.run({ db, witness }, publishWitnesses)).rejects.toThrow("Audit head mismatch");
+      expect(anchor.seq).toBe(0);
+      await db.update(schema.auditHead).set({hash:auditRows[1].hash}).where(eq(schema.auditHead.userId,"audit-user"));
       await databaseContext.run({ db, witness }, publishWitnesses);
       expect(anchor.seq).toBe(2);
       await db.delete(schema.auditEvent).where(eq(schema.auditEvent.id, auditRows[1].id));

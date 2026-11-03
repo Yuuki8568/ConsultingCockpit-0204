@@ -18,6 +18,7 @@ import { authorize } from "../step-up";
  * - それ以外の小物（goals / salesKpi / referrals / UI状態） = meta:app
  * こうすると1案件を直しただけで全データを送り直すことがなくなる。
  */
+import { installResumeSync } from "../resume-sync";
 import { MAX_SYNC_RECORDS } from "../../../shared/sync-limits";
 import type { CaseRecord, LeadRecord, VaultState } from "../../domain/types";
 import { assertUniqueImportIds, normalizeVaultState } from "../../domain/logic/state";
@@ -244,6 +245,11 @@ export class VaultStore {
 
   constructor() {
     if (typeof window !== "undefined") {
+      installResumeSync({ window, document,
+        visible: () => document.visibilityState === "visible",
+        ready: () => this.isUnlocked() && this.online,
+        sync: () => this.sync(),
+      });
       window.addEventListener("online", () => {
         this.online = true;
         void this.sync();

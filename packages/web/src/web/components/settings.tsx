@@ -980,6 +980,15 @@ function DataTab() {
         )}
       </Panel>
 
+      <Panel title="保存先と端末間の同期" note="案件本文の暗号化と、録音・動画原本の保管は別の仕組みです。">
+        <ul className="list-disc space-y-2 pl-5 text-sm">
+          <li>案件・リード・文字起こし本文は、この端末で暗号化し、既存のサーバーDBへ同期します。業務データのCloudflare D1移行はまだ完了していません。</li>
+          <li>Cloudflare D1は現在、監査記録の照合情報の保存に利用しています。</li>
+          <li>認証・端末・更新日時などの管理情報は、業務本文と同じ暗号化の対象ではありません。</li>
+          <li>別端末へ移る前に「同期済み」を確認してください。未送信データがある間は、ブラウザーの保存データを削除しないでください。</li>
+          <li>録音・動画原本は自動同期されません。バックアップ先フォルダーへの保存と、Google Driveへの転送完了も別です。</li>
+        </ul>
+      </Panel>
       <PasskeyPanel /><AutomaticBackupSettings />
       <DesktopBackup />
 

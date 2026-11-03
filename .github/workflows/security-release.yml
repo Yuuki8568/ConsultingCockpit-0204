@@ -29,6 +29,8 @@ jobs:
       - run: bun run test:contracts
       - run: bun test security-ops/hardening-maintenance.test.ts
       - run: bun run test:hardening
+      - run: cd packages/web && bun test tests/resume-sync.test.ts
+      - run: node tests/d1-atomic-batch.cjs
       - run: bun run test:audit-witness
       - run: bun run test:security
       - run: bun run build:web
