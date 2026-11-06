@@ -51,8 +51,9 @@ const modulePath = path.resolve('packages/web/tests/.witness-efficiency.mjs');
     await d1.prepare('INSERT INTO audit_head(user_id,seq,hash) VALUES (?,?,?)').bind('synthetic', head.seq, head.hash).run();
 
     for (const backend of ['libsql', 'd1']) {
-      let bytes = 0, calls = 0, posts = 0, anchor = { ...head };
-      const measure = results => { calls++; bytes += Buffer.byteLength(JSON.stringify(results)); return results; };
+      let bytes = 0, calls = 0, posts = 0, largestRead = 0, anchor = { ...head };
+      let beforePayloadRead = null;
+      const measure = results => { calls++; const size = Buffer.byteLength(JSON.stringify(results)); bytes += size; largestRead = Math.max(largestRead, size); return results; };
       const witness = { async fetch(request) {
         if (request.method === 'GET') return Response.json(anchor);
         const value = await request.json();
@@ -63,7 +64,7 @@ const modulePath = path.resolve('packages/web/tests/.witness-efficiency.mjs');
       let publish, run;
       if (backend === 'libsql') {
         const measured = new Proxy(client, { get(target, property) {
-          if (property === 'execute') return async (...args) => { const result = await target.execute(...args); measure(result.rows); return result; };
+          if (property === 'execute') return async (...args) => { if (beforePayloadRead && calls === 2) { const change = beforePayloadRead; beforePayloadRead = null; await change(); } const result = await target.execute(...args); measure(result.rows); return result; };
           if (property === 'batch') return async (...args) => { const result = await target.batch(...args); measure(result.map(r => r.rows)); return result; };
           const value = Reflect.get(target, property);
           return typeof value === 'function' ? value.bind(target) : value;
@@ -76,7 +77,7 @@ const modulePath = path.resolve('packages/web/tests/.witness-efficiency.mjs');
         const wrap = statement => {
           const proxy = new Proxy(statement, { get(target, property) {
             if (property === 'bind') return (...args) => wrap(target.bind(...args));
-            if (property === 'raw') return async (...args) => measure(await target.raw(...args));
+            if (property === 'raw') return async (...args) => { if (beforePayloadRead && calls === 2) { const change = beforePayloadRead; beforePayloadRead = null; await change(); } return measure(await target.raw(...args)); };
             const value = Reflect.get(target, property);
             return typeof value === 'function' ? value.bind(target) : value;
           }});
@@ -98,7 +99,7 @@ const modulePath = path.resolve('packages/web/tests/.witness-efficiency.mjs');
       bytes = 0; calls = 0;
       await publish();
       assert.equal(posts, 1); assert.equal(anchor.seq, 2001);
-      assert.ok(bytes < 2048, `${backend} delta returned ${bytes} bytes`); assert.equal(calls, 2);
+      assert.ok(bytes < 2048, `${backend} delta returned ${bytes} bytes`); assert.equal(calls, 3);
       await run("UPDATE audit_head SET hash=?", 'f'.repeat(64));
       await assert.rejects(publish(), /Audit head mismatch/);
       await run('UPDATE audit_head SET hash=?', history[2000][9]);
@@ -108,6 +109,49 @@ const modulePath = path.resolve('packages/web/tests/.witness-efficiency.mjs');
       await assert.rejects(publish(), /Audit tail missing/);
       assert.equal(posts, 1);
       console.log(`PASS ${backend} witness: 2000 historical events, 750 KiB anchor, ${unchangedBytes} bytes on no-op, bounded delta, no duplicate publication, head/anchor/tail rejection`);
+
+      // More than the old 16 MiB gate, but individually valid encrypted events.
+      // Every tick must make bounded progress and eventually witness the tail.
+      await run('DELETE FROM audit_event'); await run('DELETE FROM audit_head');
+      anchor = { seq: 0, hash: 'GENESIS' }; posts = 0;
+      let previous = 'GENESIS';
+      const largeHistory = [];
+      for (let seq = 1; seq <= 25; seq++) {
+        const row = { id: `large-${seq}`, userId: 'synthetic', seq, action: 'test', atMs: seq,
+          deviceId: null, payloadCiphertext: 'A'.repeat(750 * 1024), payloadIv: null,
+          prevHash: previous, hashVersion: 2 };
+        const hash = await auditHash(row);
+        const args = [row.id, row.userId, seq, row.action, seq, null, row.payloadCiphertext, null, previous, hash, 2];
+        await run(insert, ...args); largeHistory.push(args); previous = hash;
+      }
+      await run('INSERT INTO audit_head(user_id,seq,hash) VALUES (?,?,?)', 'synthetic', 25, previous);
+      bytes = 0; calls = 0; largestRead = 0;
+      while (anchor.seq < 25) {
+        const prior = anchor.seq; await publish();
+        assert.ok(anchor.seq > prior); assert.ok(anchor.seq - prior <= 2);
+        assert.equal(anchor.hash, largeHistory[anchor.seq - 1][9]);
+        assert.ok(posts <= 13);
+      }
+      assert.equal(posts, 13); assert.ok(largestRead < 2 * 1024 * 1024);
+      await publish(); assert.equal(posts, 13);
+
+      // A row growing after the metadata query cannot trigger a large payload
+      // read or advance the independent checkpoint.
+      anchor = { seq: 0, hash: 'GENESIS' }; calls = 0;
+      beforePayloadRead = () => run('UPDATE audit_event SET payload_ciphertext=? WHERE seq=1', 'B'.repeat(3 * 1024 * 1024));
+      await assert.rejects(publish(), /Audit page changed/);
+      assert.equal(beforePayloadRead, null); assert.equal(anchor.seq, 0); assert.equal(posts, 13);
+      await run('UPDATE audit_event SET payload_ciphertext=? WHERE seq=1', largeHistory[0][6]);
+      // Missing tail and changed contents must remain failures, even when the
+      // normal page length is determined by bytes rather than a fixed count.
+      anchor = { seq: 24, hash: largeHistory[23][9] };
+      await run('DELETE FROM audit_event WHERE seq=25');
+      await assert.rejects(publish(), /Audit tail missing/);
+      await run(insert, ...largeHistory[24]);
+      await run('UPDATE audit_event SET payload_ciphertext=? WHERE seq=25', 'tampered');
+      await assert.rejects(publish(), /Audit chain mismatch/);
+      assert.equal(posts, 13);
+      console.log(`PASS ${backend} witness: 18 MiB backlog, 13 bounded checkpoints, payload growth race, missing tail and tamper refusal`);
     }
   } finally {
     client.close(); await mf.dispose(); fs.rmSync(directory, { recursive: true, force: true });

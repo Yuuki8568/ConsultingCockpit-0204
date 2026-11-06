@@ -920,6 +920,7 @@ export class VaultStore {
     newKey: CryptoKey,
     newMacKey: CryptoKey,
     onProgress?: (label: string) => void,
+    validate?: (candidate: Pick<RekeyPrepared, "records" | "generation">) => void,
   ): Promise<RekeyPrepared> {
     if (!this.key) throw new Error("金庫が施錠されています");
     if (this.rekeying || await idb.getMeta("rekeyJournal")) throw new Error("未完了の鍵変更があります。再解錠して復旧してください");
@@ -954,6 +955,10 @@ export class VaultStore {
         hash: await hmacHex(newMacKey, JSON.stringify(plain)),
       });
     }
+
+    // Fail an unsendable request before any temporary media or durable journal.
+    validate?.({ records, generation: this.generation });
+    this.assertSession(epoch);
 
     // 録画：仮チャンク（__rekey__）として新しい鍵で封じ直して置く。
     // 正式採用はコミット時。AAD は本来の mediaId のものを付けるので、
@@ -1016,6 +1021,8 @@ export class VaultStore {
     const current = await idb.allRecords();
     const newById = new Map(prepared.rows.map(r => [r.id, r]));
     const expected = new Map(prepared.before.map(r => [r.id, r]));
+    if (current.length !== expected.size || current.some(row => !expected.has(row.id)))
+      throw new Error("別タブで原本の追加・削除を検知しました。復旧原本は保持されています");
     for (const row of current) {
       if (JSON.stringify(row) !== JSON.stringify(expected.get(row.id)) &&
           JSON.stringify(row) !== JSON.stringify(newById.get(row.id)))

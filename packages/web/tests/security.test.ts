@@ -5,6 +5,7 @@ import { deriveVaultKey, deriveVaultKeys, seal, open, hmacHex, newSalt } from '.
 import { recoverPortableBackup } from '../src/web/lib/export/backup-format';
 import { makeEmptyVaultState, assertUniqueImportIds } from '../src/web/domain/logic/state';
 import { sanitizeSheetCell, encodeCsv } from '../src/web/lib/export/xlsx';
+import { assertRekeyCapacity } from '../src/shared/rekey-capacity';
 let push: (...args: any[]) => Promise<any> = async () => { throw new Error('offline fixture'); };
 mock.module('../src/web/lib/api', () => ({ client: { sync: { push: (...a: any[]) => push(...a) }, vault: { rekey: async () => ({}) } } }));
 // Store-only tests stub signing; cryptographic rejection is tested in hardening-core.
@@ -126,6 +127,51 @@ test('lost rekey response preserves journal/media and new-key restart recovers a
   const audit = await store.sealAudit({dummy:'new audit'});
   expect(await open(next.vaultKey,audit)).toEqual({dummy:'new audit'});
   await expect(open(keys.vaultKey,audit)).rejects.toThrow();
+});
+test('rekey adoption rejects a concurrently removed original and retains recovery media', async () => {
+  await initialized(); await store.saveMediaBlob('preserved-media', new Blob(['original']));
+  await idb.putRecords((await idb.allRecords()).map(r => ({ ...r, dirty: 0 as const, seq: 1 })));
+  const next = await deriveVaultKeys('new-dummy-phrase', newSalt(), 100000);
+  const prepared = await store.prepareReencrypt(next.vaultKey, next.macKey);
+  await idb.replaceRecords(prepared.before, prepared.before.slice(1));
+  const concurrent = await idb.allRecords();
+  await expect(store.commitReencrypt(next.vaultKey, next.macKey, prepared)).rejects.toThrow('追加・削除');
+  expect(await idb.allRecords()).toEqual(concurrent);
+  expect(await idb.getMeta('rekeyJournal')).toBeTruthy();
+  expect((await idb.mediaChunks('preserved-media__rekey__')).length).toBeGreaterThan(0);
+  expect(await (await store.readMediaBlob('preserved-media', 'text/plain')).text()).toBe('original');
+});
+test('rekey adoption rejects same-count replacement of an original', async () => {
+  await initialized();
+  await idb.putRecords((await idb.allRecords()).map(r => ({ ...r, dirty: 0 as const, seq: 1 })));
+  const next = await deriveVaultKeys('new-dummy-phrase', newSalt(), 100000);
+  const prepared = await store.prepareReencrypt(next.vaultKey, next.macKey);
+  const replaced = [{ ...prepared.before[0]!, id: 'different-id' }, ...prepared.before.slice(1)];
+  await idb.replaceRecords(prepared.before, replaced);
+  await expect(store.commitReencrypt(next.vaultKey, next.macKey, prepared)).rejects.toThrow('追加・削除');
+  expect(await idb.allRecords()).toEqual(replaced.sort((a, b) => a.id.localeCompare(b.id)));
+  expect(await idb.getMeta('rekeyJournal')).toBeTruthy();
+});
+test('unsendable rekey stops before recovery journal or temporary media is persisted', async () => {
+  await initialized(); await store.saveMediaBlob('capacity-media', new Blob(['original']));
+  await idb.putRecords((await idb.allRecords()).map(r => ({ ...r, dirty: 0 as const, seq: 1 })));
+  const before = await idb.allRecords();
+  const next = await deriveVaultKeys('new-dummy-phrase', newSalt(), 100000);
+  await expect(store.prepareReencrypt(next.vaultKey, next.macKey, undefined, candidate =>
+    assertRekeyCapacity({ ...candidate, envelope: 'x'.repeat(4 * 1024 * 1024) }, 'd1'))).rejects.toThrow('送信容量');
+  expect(await idb.allRecords()).toEqual(before);
+  expect(await idb.getMeta('rekeyJournal')).toBeFalsy();
+  expect(await idb.mediaChunks('capacity-media__rekey__')).toEqual([]);
+  await store.abortReencrypt(); await store.unlock(keys.vaultKey, keys.macKey);
+  expect(await (await store.readMediaBlob('capacity-media','text/plain')).text()).toBe('original');
+});
+test('rekey preflight includes envelope bytes, per-record and backend count bounds', () => {
+  const records = Array.from({ length: 1001 }, () => ({ ciphertext: 'synthetic' }));
+  expect(() => assertRekeyCapacity({ records }, 'd1')).toThrow('件数');
+  expect(() => assertRekeyCapacity({ records }, 'libsql')).not.toThrow();
+  expect(() => assertRekeyCapacity({ records: [{ ciphertext: 'a'.repeat(1_048_577) }] }, 'libsql')).toThrow('1件');
+  expect(() => assertRekeyCapacity({ records: [], key: 'x'.repeat(4 * 1024 * 1024) }, 'libsql')).toThrow('送信容量');
+  expect(() => assertRekeyCapacity({ records: [{ ciphertext: 'a'.repeat(1_048_576) }] }, 'd1')).not.toThrow();
 });
 test('partial corruption also blocks edits without creating tombstones', async () => {
   await initialized(); store.lock(); await store.flushPending();

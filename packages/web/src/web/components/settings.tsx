@@ -1,6 +1,7 @@
 import { PasskeyPanel } from "./passkey-panel";
 import { authorize } from "../lib/step-up";
 import { rewrapWriteKey } from "../lib/write-signing";
+import { assertRekeyCapacity } from "../../shared/rekey-capacity";
 /** 設定 — 受託者プロフィール／書類雛形／文面ライブラリ／紹介／保全／端末／監査／取込 */
 import { useEffect, useRef, useState } from "react";
 import { useVault } from "../hooks/use-vault";
@@ -718,14 +719,19 @@ function RekeyModal({ open, onClose }: { open: boolean; onClose: () => void }) {
       const newKeys = await deriveVaultKeys(n1, salt, SEC_CONFIG.KDF_ITERATIONS);
       const verifier = await buildVerifier(newKeys.vaultKey);
       // レコードと録画を新しい鍵で封じ直す（録画は仮チャンクとして置く）
-      prepared = await vaultStore.prepareReencrypt(newKeys.vaultKey, newKeys.macKey);
-      const request = {
+      const envelope = {
         writeKey: await rewrapWriteKey(oldKeys.vaultKey,newKeys.vaultKey),
-        expectedGeneration: prepared.generation,
         kdfSalt: salt,
         kdfIterations: SEC_CONFIG.KDF_ITERATIONS,
         verifierCiphertext: verifier.ciphertext,
         verifierIv: verifier.iv,
+      };
+      prepared = await vaultStore.prepareReencrypt(newKeys.vaultKey, newKeys.macKey, undefined,
+        candidate => assertRekeyCapacity({ ...envelope, expectedGeneration: candidate.generation,
+          records: candidate.records }, st.storageBackend));
+      const request = {
+        ...envelope,
+        expectedGeneration: prepared.generation,
         records: prepared.records,
       };
       await vaultStore.saveRekeyRequest(request);
@@ -743,7 +749,7 @@ function RekeyModal({ open, onClose }: { open: boolean; onClose: () => void }) {
       setN1("");
       setN2("");
     } catch (e) {
-      // 失敗した場合は仮チャンクを捨てて、今の鍵・データは元のままにする
+      // 応答消失はロールバックを意味しない。旧・新原本と復旧情報を保全する。
       await vaultStore.abortReencrypt().catch(() => undefined);
       setMsg({
         tone: "alert",

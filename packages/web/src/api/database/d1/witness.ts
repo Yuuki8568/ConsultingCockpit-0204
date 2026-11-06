@@ -1,9 +1,10 @@
-/** D1 candidate witness publisher. Not attached to the production cron. */
-import { and, eq, gt, sql } from "drizzle-orm";
+/** Witness publisher used only when the validated D1 backend is enabled. */
+import { and, eq, gt, lte } from "drizzle-orm";
 import type { D1Database } from "@cloudflare/workers-types";
 import { drizzle } from "drizzle-orm/d1";
 import * as s from "../schema";
 import { auditHash } from "../../security/audit";
+import { selectWitnessPage, witnessPayloadBytes, witnessPageSizeGate, WITNESS_PAGE_ROWS } from "../../security/witness-page";
 export type WitnessService = { fetch(request: Request): Promise<Response> };
 export async function witnessHeadD1(service: WitnessService | undefined, userId: string) {
   if (!service) throw new Error("Audit witness unavailable");
@@ -29,27 +30,34 @@ export async function publishWitnessesD1(d1: D1Database, service: WitnessService
     const prior = await witnessHeadD1(service, head.userId);
     if (prior.seq > head.seq) throw new Error("Audit tail missing");
     // Read only the previously anchored hash, never its encrypted payload.
-    // A single batch also keeps the anchor and new page in one DB snapshot.
-    const [[anchor], rows] = await db.batch([
+    // Read the anchor and size metadata together, then recheck the bounded payload page.
+    const [[anchor], metadata] = await db.batch([
       db
         .select({ hash: s.auditEvent.hash })
         .from(s.auditEvent)
         .where(and(eq(s.auditEvent.userId, head.userId), eq(s.auditEvent.seq, prior.seq))),
       db
-        .select()
+        .select({ seq: s.auditEvent.seq, hash: s.auditEvent.hash, bytes: witnessPayloadBytes })
         .from(s.auditEvent)
         .where(
           and(
             eq(s.auditEvent.userId, head.userId),
             gt(s.auditEvent.seq, prior.seq),
-            sql`(SELECT coalesce(sum(length(payload_ciphertext)),0) FROM (SELECT payload_ciphertext FROM audit_event WHERE user_id=${head.userId} AND seq>${prior.seq} ORDER BY seq LIMIT 1000))<=16777216`,
           ),
         )
         .orderBy(s.auditEvent.seq)
-        .limit(1000),
+        .limit(WITNESS_PAGE_ROWS + 1),
     ]);
     if (prior.seq && anchor?.hash !== prior.hash)
       throw new Error("Audit checkpoint mismatch");
+    const page = selectWitnessPage(metadata, prior.seq);
+    const rows = page.rows.length ? await db.select().from(s.auditEvent).where(and(
+      eq(s.auditEvent.userId, head.userId), gt(s.auditEvent.seq, prior.seq),
+      lte(s.auditEvent.seq, page.cursor), witnessPageSizeGate(head.userId, prior.seq, page.cursor),
+    )).orderBy(s.auditEvent.seq).limit(WITNESS_PAGE_ROWS) : [];
+    if (rows.length !== page.rows.length || rows.some((r, i) =>
+      r.seq !== page.rows[i].seq || r.hash !== page.rows[i].hash))
+      throw new Error("Audit page changed during verification");
     let seq = prior.seq,
       hash = prior.hash;
     for (const r of rows) {
@@ -59,8 +67,8 @@ export async function publishWitnessesD1(d1: D1Database, service: WitnessService
       hash = r.hash;
     }
     // The head is read before the page: concurrent appends may extend it, but
-    // a short page may never stop before the head we already observed.
-    if (seq < head.seq && rows.length < 1000) throw new Error("Audit tail missing");
+    // an exhausted metadata page cannot stop before the head already observed.
+    if (seq < head.seq && !page.hasMore) throw new Error("Audit tail missing");
     const observedHead = rows.find((r) => r.seq === head.seq);
     if (
       (observedHead && observedHead.hash !== head.hash) ||
