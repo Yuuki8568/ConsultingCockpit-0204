@@ -1,12 +1,13 @@
 /** D1 cutover candidate. Not connected to the production router or bindings. */
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import { drizzle } from "drizzle-orm/d1";
-import { eq, and, desc, sql } from "drizzle-orm";
+import { eq, and, desc, gt, inArray, sql } from "drizzle-orm";
 import { ORPCError } from "@orpc/server";
 import * as s from "../schema";
 import { syncInput, type SyncInput } from "../../security/sync-input";
 import { operationHash, signingMessage } from "../../../shared/operation-proof";
 import { auditHash } from "../../security/audit";
+import { MAX_SYNC_PAGE_ROWS, SYNC_ROW_OVERHEAD, selectSyncPage } from "../../../shared/sync-page";
 import { atomicCheckedBatch } from "../../../../../../cloudflare/d1/atomic-batch";
 
 export type SyncPrincipal = { userId: string; sessionId: string; deviceId: string };
@@ -21,8 +22,9 @@ const fail = (
 ): never => {
   throw new ORPCError(code);
 };
-const MAX_SNAPSHOT_ROWS = 1000,
-  MAX_SNAPSHOT_BYTES = 16 * 1024 * 1024;
+// Keep the existing whole-vault safety envelope until key rotation is paged.
+const MAX_VAULT_ROWS = 1000;
+const MAX_VAULT_BYTES = 16 * 1024 * 1024;
 const sqlNow = "CAST(unixepoch('subsec') * 1000 AS INTEGER)";
 
 async function budget(d1: D1Database, uid: string, input: SyncInput) {
@@ -55,7 +57,6 @@ export async function pushD1(d1: D1Database, principal: SyncPrincipal, raw: unkn
   if (new TextEncoder().encode(JSON.stringify(input)).byteLength > 4 * 1024 * 1024)
     fail("PAYLOAD_TOO_LARGE");
   const q = drizzle(d1, { schema: s });
-  const withinSize = sql`(SELECT coalesce(sum(length(ciphertext)+length(iv)),0) FROM record WHERE user_id=${uid}) <= ${MAX_SNAPSHOT_BYTES}`;
   const snapshot = await q.batch([
     q.select().from(s.vault).where(eq(s.vault.userId, uid)),
     q
@@ -75,23 +76,40 @@ export async function pushD1(d1: D1Database, principal: SyncPrincipal, raw: unkn
     q
       .select()
       .from(s.record)
-      .where(and(eq(s.record.userId, uid), withinSize))
-      .orderBy(s.record.seq)
-      .limit(MAX_SNAPSHOT_ROWS + 1),
+      .where(
+        and(
+          eq(s.record.userId, uid),
+          inArray(
+            s.record.id,
+            input.records.map((r) => r.id),
+          ),
+        ),
+      ),
     q.select().from(s.auditHead).where(eq(s.auditHead.userId, uid)),
     q
-      .select()
+      .select({ seq: s.auditEvent.seq, hash: s.auditEvent.hash })
       .from(s.auditEvent)
       .where(eq(s.auditEvent.userId, uid))
       .orderBy(desc(s.auditEvent.seq))
       .limit(1),
     q
       .select({
+        seq: sql<number>`coalesce(max(seq),0)`,
         n: sql<number>`count(*)`,
         bytes: sql<number>`coalesce(sum(length(ciphertext)+length(iv)),0)`,
       })
       .from(s.record)
       .where(eq(s.record.userId, uid)),
+    q
+      .select({
+        id: s.record.id,
+        seq: s.record.seq,
+        bytes: sql<number>`length(ciphertext)+length(iv)`,
+      })
+      .from(s.record)
+      .where(and(eq(s.record.userId, uid), gt(s.record.seq, input.since)))
+      .orderBy(s.record.seq)
+      .limit(MAX_SYNC_PAGE_ROWS + 1),
   ]);
   const [
     [v],
@@ -103,7 +121,8 @@ export async function pushD1(d1: D1Database, principal: SyncPrincipal, raw: unkn
     records,
     [head],
     [tail],
-    [size],
+    [maxRecord],
+    pageMetadata,
   ] = snapshot;
   if (
     !device ||
@@ -117,10 +136,9 @@ export async function pushD1(d1: D1Database, principal: SyncPrincipal, raw: unkn
   await budget(d1, uid, input); // Rejected attempts persist independently of the business transaction.
   if (!v) fail("NOT_FOUND");
   if (v.generation !== input.generation) fail("CONFLICT");
-  if (size.n !== records.length || size.bytes > MAX_SNAPSHOT_BYTES) fail("PAYLOAD_TOO_LARGE");
   if (
-    records.length > MAX_SNAPSHOT_ROWS ||
-    new TextEncoder().encode(JSON.stringify(records)).byteLength > MAX_SNAPSHOT_BYTES
+    maxRecord.n > MAX_VAULT_ROWS ||
+    maxRecord.bytes + maxRecord.n * SYNC_ROW_OVERHEAD > MAX_VAULT_BYTES
   )
     fail("PAYLOAD_TOO_LARGE");
   if (
@@ -174,14 +192,50 @@ export async function pushD1(d1: D1Database, principal: SyncPrincipal, raw: unkn
   const changes: { statement: D1PreparedStatement; expectedChanges: number }[] = [];
   const add = (sql: string, args: unknown[], expectedChanges = 1) =>
     changes.push({ statement: d1.prepare(sql).bind(...args), expectedChanges });
-  const maximum = Math.max(0, ...records.map((r) => r.seq));
+  let page: ReturnType<typeof selectSyncPage>;
+  try {
+    page = selectSyncPage(pageMetadata, input.since);
+  } catch {
+    return fail("PAYLOAD_TOO_LARGE");
+  }
+  const pageQueries = [];
+  for (let start = 0; start < page.ids.length; start += 80) {
+    pageQueries.push(
+      q
+        .select()
+        .from(s.record)
+        .where(
+          and(eq(s.record.userId, uid), inArray(s.record.id, page.ids.slice(start, start + 80))),
+        ),
+    );
+  }
+  const [firstPageQuery, ...remainingPageQueries] = pageQueries;
+  const pageRows = firstPageQuery
+    ? (await q.batch([firstPageQuery, ...remainingPageQueries])).flat()
+    : [];
+  if (pageRows.length !== page.ids.length) fail("CONFLICT");
+  const metadataById = new Map(pageMetadata.map((r) => [r.id, r]));
+  if (
+    pageRows.some(
+      (r) =>
+        r.seq !== metadataById.get(r.id)?.seq ||
+        r.ciphertext.length + r.iv.length !== metadataById.get(r.id)?.bytes,
+    )
+  )
+    fail("CONFLICT");
+  const maximum = Number(maxRecord.seq);
   // These guards share the commit transaction with every ciphertext and audit mutation.
   add(
     `UPDATE device SET last_seen_at_ms=? WHERE id=? AND user_id=? AND revoked_at_ms IS NULL
  AND EXISTS(SELECT 1 FROM device_session WHERE session_id=? AND user_id=? AND device_id=?)
  AND EXISTS(SELECT 1 FROM session WHERE id=? AND user_id=? AND expires_at>${sqlNow})
  AND EXISTS(SELECT 1 FROM vault WHERE user_id=? AND generation=? AND kdf_salt=? AND verifier_ciphertext=? AND verifier_iv=?)
- AND (SELECT count(*) FROM record WHERE user_id=?)=? AND (SELECT coalesce(max(seq),0) FROM record WHERE user_id=?)=?`,
+ AND (SELECT count(*) FROM record WHERE user_id=?)=?
+ AND (SELECT coalesce(max(seq),0) FROM record WHERE user_id=?)=?
+ AND coalesce((SELECT seq FROM audit_head WHERE user_id=?),0)=?
+ AND coalesce((SELECT hash FROM audit_head WHERE user_id=?),'GENESIS')=?
+ AND coalesce((SELECT seq FROM audit_event WHERE user_id=? ORDER BY seq DESC LIMIT 1),0)=?
+ AND coalesce((SELECT hash FROM audit_event WHERE user_id=? ORDER BY seq DESC LIMIT 1),'GENESIS')=?`,
     [
       Date.now(),
       input.deviceId,
@@ -197,9 +251,17 @@ export async function pushD1(d1: D1Database, principal: SyncPrincipal, raw: unkn
       v.verifierCiphertext,
       v.verifierIv,
       uid,
-      records.length,
+      maxRecord.n,
       uid,
       maximum,
+      uid,
+      head?.seq ?? 0,
+      uid,
+      head?.hash ?? "GENESIS",
+      uid,
+      tail?.seq ?? 0,
+      uid,
+      tail?.hash ?? "GENESIS",
     ],
   );
   if (input.records.length) {
@@ -305,8 +367,22 @@ export async function pushD1(d1: D1Database, principal: SyncPrincipal, raw: unkn
       acceptedVersions[r.id] = old.seq;
     }
   }
-  // Never accept a write that makes the next request exceed this candidate's bounds.
-  if (byId.size > MAX_SNAPSHOT_ROWS || new TextEncoder().encode(JSON.stringify([...byId.values()])).byteLength > MAX_SNAPSHOT_BYTES) fail("PAYLOAD_TOO_LARGE");
+  const original = new Map(records.map((r) => [r.id, r]));
+  let resultingCount = Number(maxRecord.n),
+    resultingBytes = Number(maxRecord.bytes);
+  for (const row of byId.values()) {
+    const before = original.get(row.id);
+    if (!before) resultingCount++;
+    resultingBytes +=
+      row.ciphertext.length +
+      row.iv.length -
+      (before ? before.ciphertext.length + before.iv.length : 0);
+  }
+  if (
+    resultingCount > MAX_VAULT_ROWS ||
+    resultingBytes + resultingCount * SYNC_ROW_OVERHEAD > MAX_VAULT_BYTES
+  )
+    fail("PAYLOAD_TOO_LARGE");
   if (accepted.length) {
     const row = {
       id: crypto.randomUUID(),
@@ -340,20 +416,22 @@ export async function pushD1(d1: D1Database, principal: SyncPrincipal, raw: unkn
   } catch {
     fail("CONFLICT");
   }
-  // Return the exact committed view, not a later query that could cross a rekey.
-  const changed = [...byId.values()]
-    .filter((r) => r.seq > input.since)
-    .sort((a, b) => a.seq - b.seq);
-  const cursor = changed.length ? changed[changed.length - 1].seq : input.since;
-  const seen = new Set(changed.map((r) => r.id));
-  for (const c of conflicts) if (!seen.has(c.id)) changed.push(byId.get(c.id)!);
+  // Use the snapshot page plus committed local writes. Keep the page cursor
+  // separate from newer accepted/conflict rows so no unseen delta is skipped.
+  const changedById = new Map(pageRows.map((r) => [r.id, byId.get(r.id) ?? r]));
+  for (const r of byId.values()) {
+    if ((!page.hasMore && r.seq > input.since) || conflicts.some((c) => c.id === r.id))
+      changedById.set(r.id, r);
+  }
+  const changed = [...changedById.values()].sort((a, b) => a.seq - b.seq);
+  const cursor = page.hasMore ? page.cursor : Math.max(page.cursor, ...changed.map((r) => r.seq));
   return {
     generation: v.generation,
     accepted,
     acceptedVersions,
     conflicts,
     cursor,
-    hasMore: false,
+    hasMore: page.hasMore,
     changed: changed.map((c) => ({
       id: c.id,
       type: c.type,

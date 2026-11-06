@@ -5,7 +5,7 @@ import { bodyLimit } from "hono/body-limit";
 import { ORPCError } from "@orpc/server";
 import { z } from "zod";
 import { drizzle } from "drizzle-orm/d1";
-import { eq, and, gt, desc, sql } from "drizzle-orm";
+import { eq, and, desc, sql } from "drizzle-orm";
 import { base, createApp } from "../../__core/app";
 import { isAllowedOrigin } from "../../origins";
 import * as s from "../schema";
@@ -21,6 +21,7 @@ import { auditPlanD1 } from "./audit-plan";
 import { atomicCheckedBatch } from "../../../../../../cloudflare/d1/atomic-batch";
 import { createD1Audit } from "./audit";
 import type { WitnessService } from "./witness";
+import { STORAGE_USAGE_SELECTS, summarizeStorageUsage } from "../../security/storage-usage";
 
 export function createD1Api(d1: D1Database, witness?: WitnessService, readOnly = false) {
   const q = drizzle(d1, { schema: s });
@@ -76,6 +77,15 @@ export function createD1Api(d1: D1Database, witness?: WitnessService, readOnly =
         .handler(({ context, input }) => writeChallengeD1(d1, principal(context), input)),
     },
     vault: {
+      storageUsage: authed.handler(async ({ context }) => {
+        const uid = context.user.id;
+        await consumeD1Limit(d1, `storage-usage:${uid}`, 3, 60_000);
+        const results = await d1.batch<Record<string, unknown>>(
+          [STORAGE_USAGE_SELECTS.records, STORAGE_USAGE_SELECTS.revisions, STORAGE_USAGE_SELECTS.audit]
+            .map(query => d1.prepare(query).bind(uid)),
+        );
+        return summarizeStorageUsage("d1", results[0].results[0], results[1].results[0], results[2].results[0]);
+      }),
       status: authed.handler(async ({ context }) => {
         const [v] = await q.select().from(s.vault).where(eq(s.vault.userId, context.user.id));
         return v
@@ -115,38 +125,16 @@ export function createD1Api(d1: D1Database, witness?: WitnessService, readOnly =
         )
         .handler(async ({ context, input }) => {
           if (bound(context).deviceId !== input.deviceId) throw new ORPCError("FORBIDDEN");
-          const size = await d1
-            .prepare(
-              "SELECT coalesce(sum(length(ciphertext)+length(iv)),0) bytes FROM record WHERE user_id=?",
-            )
-            .bind(context.user.id)
-            .first<{ bytes: number }>();
-          if (!size || size.bytes > 16777216) throw new ORPCError("PAYLOAD_TOO_LARGE");
-          const rows = await q
-            .select()
-            .from(s.record)
-            .where(
-              and(
-                eq(s.record.userId, context.user.id),
-                gt(s.record.seq, input.after),
-                sql`(SELECT coalesce(sum(length(ciphertext)+length(iv)),0) FROM record WHERE user_id=${context.user.id})<=16777216`,
-              ),
-            )
-            .orderBy(s.record.seq)
-            .limit(1000);
+          const [vault] = await q.select({ generation: s.vault.generation }).from(s.vault)
+            .where(eq(s.vault.userId, context.user.id));
+          if (!vault) throw new ORPCError("NOT_FOUND");
+          // Reuse bounded paging, rate limits and commit-time session/vault guards.
+          const page = await pushD1(d1, bound(context), {
+            deviceId: input.deviceId, generation: vault.generation,
+            since: input.after, records: [],
+          });
           return {
-            records: rows.map((r) => ({
-              id: r.id,
-              type: r.type,
-              ciphertext: r.ciphertext,
-              iv: r.iv,
-              updatedAtMs: r.updatedAtMs,
-              version: r.version,
-              deleted: r.deletedAt != null,
-              seq: r.seq,
-            })),
-            cursor: rows.at(-1)?.seq ?? input.after,
-            hasMore: rows.length === 1000,
+            records: page.changed, cursor: page.cursor, hasMore: page.hasMore,
           };
         }),
       stats: authed.handler(async ({ context }) => {

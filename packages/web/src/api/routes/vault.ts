@@ -9,6 +9,7 @@ import { z } from "zod";
 import { db } from "../database";
 import * as schema from "../database/schema";
 import { authed } from "../middleware/auth";
+import { storageUsageQueries, summarizeStorageUsage } from "../security/storage-usage";
 
 /**
  * 金庫メタの管理。
@@ -26,6 +27,19 @@ const UNLOCK_PARAMS_MAX = 20;
 
 
 export const vault = {
+  /** Explicit request only: do not scan storage on ordinary status/sync calls. */
+  storageUsage: authed.handler(async ({ context }) => {
+    const uid = context.user.id;
+    const allowed = await db.transaction(tx => consumeLimit(tx, `storage-usage:${uid}`, 1, 3, 60_000));
+    if (!allowed) throw new ORPCError("TOO_MANY_REQUESTS", { message: "容量の集計が続いています。1分ほど待って再確認してください。" });
+    const queries = storageUsageQueries(uid);
+    return db.transaction(async tx => {
+      const [records] = await tx.all<Record<string, unknown>>(queries.records);
+      const [revisions] = await tx.all<Record<string, unknown>>(queries.revisions);
+      const [audit] = await tx.all<Record<string, unknown>>(queries.audit);
+      return summarizeStorageUsage("libsql", records, revisions, audit);
+    }, { behavior: "deferred" });
+  }),
   /**
    * 金庫の有無と、秘密にあたらない情報だけを返す。
    * 鍵の材料（salt・検証トークン）はここでは返さない。→ unlockParams

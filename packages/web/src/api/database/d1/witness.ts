@@ -28,25 +28,28 @@ export async function publishWitnessesD1(d1: D1Database, service: WitnessService
   for (const head of heads) {
     const prior = await witnessHeadD1(service, head.userId);
     if (prior.seq > head.seq) throw new Error("Audit tail missing");
-    if (prior.seq) {
-      const [row] = await db
+    // Read only the previously anchored hash, never its encrypted payload.
+    // A single batch also keeps the anchor and new page in one DB snapshot.
+    const [[anchor], rows] = await db.batch([
+      db
+        .select({ hash: s.auditEvent.hash })
+        .from(s.auditEvent)
+        .where(and(eq(s.auditEvent.userId, head.userId), eq(s.auditEvent.seq, prior.seq))),
+      db
         .select()
         .from(s.auditEvent)
-        .where(and(eq(s.auditEvent.userId, head.userId), eq(s.auditEvent.seq, prior.seq)));
-      if (row?.hash !== prior.hash) throw new Error("Audit checkpoint mismatch");
-    }
-    const rows = await db
-      .select()
-      .from(s.auditEvent)
-      .where(
-        and(
-          eq(s.auditEvent.userId, head.userId),
-          gt(s.auditEvent.seq, prior.seq),
-          sql`(SELECT coalesce(sum(length(payload_ciphertext)),0) FROM (SELECT payload_ciphertext FROM audit_event WHERE user_id=${head.userId} AND seq>${prior.seq} ORDER BY seq LIMIT 1000))<=16777216`,
-        ),
-      )
-      .orderBy(s.auditEvent.seq)
-      .limit(1000);
+        .where(
+          and(
+            eq(s.auditEvent.userId, head.userId),
+            gt(s.auditEvent.seq, prior.seq),
+            sql`(SELECT coalesce(sum(length(payload_ciphertext)),0) FROM (SELECT payload_ciphertext FROM audit_event WHERE user_id=${head.userId} AND seq>${prior.seq} ORDER BY seq LIMIT 1000))<=16777216`,
+          ),
+        )
+        .orderBy(s.auditEvent.seq)
+        .limit(1000),
+    ]);
+    if (prior.seq && anchor?.hash !== prior.hash)
+      throw new Error("Audit checkpoint mismatch");
     let seq = prior.seq,
       hash = prior.hash;
     for (const r of rows) {

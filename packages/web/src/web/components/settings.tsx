@@ -38,6 +38,7 @@ import { deviceIdFor, vaultStore } from "../lib/store/vault-store";
 import { useDesktop } from "../hooks/use-desktop";
 import { AutomaticBackupSettings } from "./automatic-backup";
 import { DesktopBackup } from "./desktop-backup";
+import { StorageUsagePanel } from "./storage-usage";
 
 type Tab = "profile" | "templates" | "messages" | "referrals" | "security" | "data";
 
@@ -1030,6 +1031,7 @@ function DataTab() {
           <li>録音・動画原本は自動同期されません。バックアップ先フォルダーへの保存と、Google Driveへの転送完了も別です。</li>
         </ul>
       </Panel>
+      <StorageUsagePanel />
       <PasskeyPanel /><AutomaticBackupSettings />
       <DesktopBackup />
 

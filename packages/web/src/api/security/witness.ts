@@ -27,19 +27,23 @@ export async function publishWitnesses() {
   for (const head of heads) {
     const prior = await witnessHead(head.userId);
     if (prior.seq > head.seq) throw new Error("Audit tail missing");
-    if (prior.seq) {
-      const [row] = await db
+    // The anchor only needs its hash: fetching an already witnessed encrypted
+    // payload on every cron tick adds transfer without strengthening this check.
+    // Batch both reads to avoid a second network round trip for remote libSQL.
+    const [[anchor], rows] = await db.batch([
+      db
+        .select({ hash: s.auditEvent.hash })
+        .from(s.auditEvent)
+        .where(and(eq(s.auditEvent.userId, head.userId), eq(s.auditEvent.seq, prior.seq))),
+      db
         .select()
         .from(s.auditEvent)
-        .where(and(eq(s.auditEvent.userId, head.userId), eq(s.auditEvent.seq, prior.seq)));
-      if (row?.hash !== prior.hash) throw new Error("Audit checkpoint mismatch");
-    }
-    const rows = await db
-      .select()
-      .from(s.auditEvent)
-      .where(and(eq(s.auditEvent.userId, head.userId), gt(s.auditEvent.seq, prior.seq)))
-      .orderBy(s.auditEvent.seq)
-      .limit(1000);
+        .where(and(eq(s.auditEvent.userId, head.userId), gt(s.auditEvent.seq, prior.seq)))
+        .orderBy(s.auditEvent.seq)
+        .limit(1000),
+    ]);
+    if (prior.seq && anchor?.hash !== prior.hash)
+      throw new Error("Audit checkpoint mismatch");
     let seq = prior.seq,
       hash = prior.hash;
     for (const r of rows) {
