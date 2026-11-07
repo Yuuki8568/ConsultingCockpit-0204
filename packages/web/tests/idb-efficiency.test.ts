@@ -107,3 +107,104 @@ test('an interrupted delta transaction rolls back every write', async () => {
   } finally { IDBObjectStore.prototype.put = put; }
   expect(await idb.allRecords()).toEqual(before);
 }, 30_000);
+
+test('large snapshot edit and restore avoid a second whole-store read and vault-sized JSON', async () => {
+  const rows = Array.from({ length: 2048 }, (_, i) => ({
+    ...row(`large:${String(i).padStart(4, '0')}`, 0), ciphertext: 'x'.repeat(16 * 1024),
+  }));
+  await idb.putRecords(rows);
+  const before = await idb.allRecords();
+  const getAll = IDBObjectStore.prototype.getAll, stringify = JSON.stringify;
+  let compared = 0, largest = 0;
+  IDBObjectStore.prototype.getAll = function () { throw new Error('whole-store comparison forbidden'); };
+  JSON.stringify = ((value: unknown, replacer: any, space: any) => {
+    if (Array.isArray(value) && value.some(r => r && typeof r === 'object' && 'ciphertext' in r))
+      throw new Error('vault-sized comparison forbidden');
+    const text = stringify(value, replacer, space);
+    if (value && typeof value === 'object' && 'ciphertext' in value) {
+      compared++; largest = Math.max(largest, text.length);
+    }
+    return text;
+  }) as typeof JSON.stringify;
+  const update = { ...before[0]!, ciphertext: 'edited', dirty: 1 as const };
+  try {
+    await idb.patchRecords(before, [update]);
+    const patched = [update, ...before.slice(1)];
+    await idb.replaceRecords(patched, [row('restored')]);
+  } finally { IDBObjectStore.prototype.getAll = getAll; JSON.stringify = stringify; }
+  expect(compared).toBe(2048 * 2 * 2);
+  expect(largest).toBeLessThan(17 * 1024);
+  expect(await idb.allRecords()).toEqual([row('restored')]);
+}, 30_000);
+
+test('both snapshot operations reject changes to every field of an untouched row', async () => {
+  const modifications = [
+    { type: 'case' }, { ciphertext: 'different' }, { iv: 'different' },
+    { updatedAtMs: 2 }, { deleted: true }, { seq: 2 }, { dirty: 1 as const },
+    { hash: 'different-keyed-fingerprint' }, { extra: 'unknown-field' },
+  ];
+  for (const operation of ['patchRecords', 'replaceRecords'] as const) {
+    for (const modification of modifications) {
+      await idb.clearRecords();
+      await idb.putRecords([row('a', 0), row('b', 0)]);
+      const before = await idb.allRecords();
+      const concurrent = { ...before[1]!, ...modification };
+      await idb.putRecord(concurrent);
+      await expect(idb[operation](before, [{ ...before[0]!, ciphertext: 'must-not-save' }])).rejects.toThrow('別の処理');
+      expect(await idb.allRecords()).toEqual([before[0]!, concurrent]);
+    }
+  }
+}, 30_000);
+
+test('snapshot CAS detects additions, deletions, same-count substitution and duplicate expected IDs', async () => {
+  for (const operation of ['patchRecords', 'replaceRecords'] as const) {
+    for (const change of ['addition', 'deletion', 'substitution', 'duplicate']) {
+      await idb.clearRecords(); await idb.putRecords([row('a'), row('b')]);
+      const before = await idb.allRecords();
+      if (change === 'addition') await idb.putRecord(row('c'));
+      if (change === 'deletion' || change === 'substitution') await idb.deleteRecord('b');
+      if (change === 'substitution') await idb.putRecord(row('c'));
+      const actual = await idb.allRecords();
+      const expected = change === 'duplicate' ? [before[0]!, before[0]!] : before;
+      await expect(idb[operation](expected, [row('replacement')])).rejects.toThrow('別の処理');
+      expect(await idb.allRecords()).toEqual(actual);
+    }
+  }
+}, 30_000);
+
+test('interrupted cursor scanning writes nothing and a failed restore rolls back clear and puts', async () => {
+  await idb.putRecords([row('a'), row('b'), row('c')]);
+  const before = await idb.allRecords();
+  const advance = IDBCursor.prototype.continue;
+  let scanned = 0;
+  IDBCursor.prototype.continue = function (...args: Parameters<typeof advance>) {
+    if (++scanned === 2) { (this.source as IDBObjectStore).transaction.abort(); return; }
+    return advance.apply(this, args);
+  };
+  try { await expect(idb.replaceRecords(before, [row('replacement')])).rejects.toThrow(); }
+  finally { IDBCursor.prototype.continue = advance; }
+  expect(await idb.allRecords()).toEqual(before);
+  const put = IDBObjectStore.prototype.put;
+  let writes = 0;
+  IDBObjectStore.prototype.put = function (...args: Parameters<typeof put>) {
+    if (++writes === 2) throw new DOMException('synthetic quota failure', 'QuotaExceededError');
+    return put.apply(this, args);
+  };
+  try { await expect(idb.replaceRecords(before, [row('replacement-a'), row('replacement-b')])).rejects.toThrow(); }
+  finally { IDBObjectStore.prototype.put = put; }
+  expect(writes).toBe(2);
+  expect(await idb.allRecords()).toEqual(before);
+}, 30_000);
+
+test('expected scalar values are pinned before awaiting DB and empty snapshots remain atomic', async () => {
+  await idb.putRecords([row('a')]);
+  const before = await idb.allRecords();
+  const after = { ...before[0]!, ciphertext: 'saved' };
+  const pending = idb.patchRecords(before, [after]);
+  before[0]!.ciphertext = 'caller-mutated-after-start';
+  await pending;
+  expect(await idb.allRecords()).toEqual([after]);
+  await idb.replaceRecords([after], []);
+  await idb.replaceRecords([], [row('new')]);
+  expect(await idb.allRecords()).toEqual([row('new')]);
+});
