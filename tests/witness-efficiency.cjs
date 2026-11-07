@@ -156,4 +156,5 @@ const modulePath = path.resolve('packages/web/tests/.witness-efficiency.mjs');
   } finally {
     client.close(); await mf.dispose(); fs.rmSync(directory, { recursive: true, force: true });
   }
+  await require('./audit-verification-pages.cjs')();
 })().catch(error => { console.error(error); process.exitCode = 1; }).finally(() => fs.rmSync(modulePath, { force: true }));

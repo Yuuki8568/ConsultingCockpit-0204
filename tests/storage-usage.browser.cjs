@@ -20,8 +20,12 @@ import '/src/web/styles.css';
 import React from 'react';
 import { createRoot } from 'react-dom/client';
 import { StorageUsagePanel } from '/src/web/components/storage-usage';
+import { AuditVerificationControl } from '/src/web/components/audit-verification';
 window.calls = 0;
-createRoot(document.body.appendChild(document.createElement('div'))).render(<main style={{ padding: 12, maxWidth: 700 }}><StorageUsagePanel /></main>);
+window.auditCalls = 0;
+window.auditInputs = [];
+window.root = createRoot(document.body.appendChild(document.createElement('div')));
+window.root.render(<main style={{ padding: 12, maxWidth: 700 }}><StorageUsagePanel /><AuditVerificationControl /></main>);
 `,
   );
   const server = spawn(
@@ -58,6 +62,12 @@ export const client = { vault: { storageUsage: async () => {
   if (window.shouldFail) throw Error('must not display raw provider error');
   if (window.defer) await new Promise(resolve => { window.finish = resolve; });
   return window.usage;
+} }, audit: { verifyChain: async input => {
+  window.auditCalls++; window.auditInputs.push(input);
+  if (window.auditFail) throw Error('private-provider-error');
+  const result = window.auditResults.shift();
+  if (window.auditHoldAt === window.auditCalls) await new Promise(resolve => { window.auditContinue = resolve; });
+  return result;
 } } };
 `,
         }),
@@ -155,6 +165,54 @@ export const client = { vault: { storageUsage: async () => {
       assert.equal(await page.getByText(/Cloudflare D1：/).count(), 0, "no assumed cutover");
       assert.equal(await page.evaluate(() => window.calls), 3);
       console.log("PASS manual storage usage, safe refresh and responsive layout:", width);
+
+      const audit = page.getByRole('button', { name: '改ざんがないか確認', exact: true });
+      assert.equal(await page.evaluate(() => window.auditCalls), 0, 'audit is manual only');
+      assert.ok((await audit.boundingBox()).height >= 44);
+      await page.evaluate(() => {
+        window.auditResults = [
+          { ok: false, complete: false, checked: 100, total: 205, startedAtMs: 1, startsAtSeq: 1, cursor: 'signed-cursor' },
+          { ok: true, complete: true, checked: 205, total: 205, startedAtMs: 1, startsAtSeq: 1 },
+        ];
+        window.auditHoldAt = 2;
+      });
+      await audit.click();
+      await page.getByRole('status').filter({ hasText: '205 件中 100 件' }).waitFor();
+      assert.equal(await page.getByText('205 件の連鎖と、独立保存済みの地点が一致しました。').count(), 0);
+      assert.equal(await page.evaluate(() => window.auditInputs[1].cursor), 'signed-cursor');
+      await page.evaluate(() => window.auditContinue());
+      await page.getByText('205 件の連鎖と、独立保存済みの地点が一致しました。').waitFor();
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1), false);
+
+      // Cancel while the network ignores abort, then release the old response.
+      // It must not request another page or restore a stale success message.
+      await page.evaluate(() => {
+        window.auditResults = [{ ok: false, complete: false, checked: 100, total: 205, startedAtMs: 1, startsAtSeq: 1, cursor: 'old' }];
+        window.auditHoldAt = 3;
+      });
+      await audit.click();
+      await page.getByRole('button', { name: '確認を中止', exact: true }).click();
+      await page.getByText(/確認を中止しました。全件の確認は完了していません/).waitFor();
+      await page.evaluate(() => window.auditContinue());
+      await page.waitForTimeout(100);
+      assert.equal(await page.evaluate(() => window.auditCalls), 3);
+      assert.equal(await page.getByText('205 件の連鎖と、独立保存済みの地点が一致しました。').count(), 0);
+      await page.evaluate(() => { window.auditFail = true; });
+      await audit.click();
+      await page.getByText(/検証を完了できません。通信とログイン状態を確認し/).waitFor();
+      assert.equal((await page.locator('body').innerText()).includes('private-provider-error'), false);
+
+      await page.evaluate(() => {
+        window.auditFail = false;
+        window.auditResults = [{ ok: false, complete: false, checked: 100, total: 205, startedAtMs: 1, startsAtSeq: 1, cursor: 'unmount' }];
+        window.auditHoldAt = 5;
+      });
+      await audit.click();
+      await page.getByRole('button', { name: '確認を中止', exact: true }).waitFor();
+      await page.evaluate(() => { window.root.unmount(); window.auditContinue(); });
+      await page.waitForTimeout(100);
+      assert.equal(await page.evaluate(() => window.auditCalls), 5, 'unmount stops subsequent pages');
+      console.log('PASS audit progress, complete-only success, cancellation, errors and unmount:', width);
       await page.close();
     }
   } finally {

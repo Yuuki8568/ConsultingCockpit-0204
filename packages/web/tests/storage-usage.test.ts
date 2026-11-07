@@ -28,7 +28,7 @@ test("usage SQL returns only tenant-scoped aggregates and counts UTF-8 revision 
     expect(result.revisions.logicalBytes).toBe(new TextEncoder().encode('{"暗号文":"AAAA"}').length);
     expect(result.audit).toEqual({ count: 2, ciphertextBytes: 4, encryptedPayloadBytes: 6 });
     expect(result.limits.find(x => x.key === "sync-payload")?.used).toBe(16 + 2 * 1024);
-    expect(result.limits.find(x => x.key === "audit-payload")?.used).toBe(4);
+    expect(result.limits.some(x => x.key.startsWith("audit-"))).toBe(false);
     expect(JSON.stringify(result)).not.toContain("private-other");
     const unknown = db.query(STORAGE_USAGE_SELECTS.records).get("missing") as Record<string, unknown>;
     expect(unknown).toEqual(emptyRecords);

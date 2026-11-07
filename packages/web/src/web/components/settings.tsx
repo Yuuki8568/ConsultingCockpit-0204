@@ -2,6 +2,7 @@ import { PasskeyPanel } from "./passkey-panel";
 import { authorize } from "../lib/step-up";
 import { rewrapWriteKey } from "../lib/write-signing";
 import { assertRekeyCapacity } from "../../shared/rekey-capacity";
+import { AuditVerificationControl } from "./audit-verification";
 /** 設定 — 受託者プロフィール／書類雛形／文面ライブラリ／紹介／保全／端末／監査／取込 */
 import { useEffect, useRef, useState } from "react";
 import { useVault } from "../hooks/use-vault";
@@ -386,12 +387,8 @@ function SecurityTab() {
   const [history, setHistory] = useState<
     { id: string; atMs: number; kind: string; platform: string | null }[]
   >([]);
-  const [chain, setChain] = useState<{ ok: boolean; checked: number; reason?: string } | null>(
-    null,
-  );
   const [auditCount, setAuditCount] = useState<number | null>(null);
   const [conflicts, setConflicts] = useState<{ id: string; at: number }[]>([]);
-  const [busy, setBusy] = useState(false);
   const [rekeyOpen, setRekeyOpen] = useState(false);
   const [loadErrors, setLoadErrors] = useState<Record<string,string>>({});
   const [loading, setLoading] = useState(false);
@@ -577,34 +574,12 @@ function SecurityTab() {
       <Panel
         title="操作の記録"
         note={auditCount != null ? `${auditCount} 件記録されています。` : undefined}
-        right={
-          <button
-            className="btn btn-sm"
-            disabled={busy}
-            onClick={async () => {
-              setBusy(true);
-              try {
-                setChain(await client.audit.verifyChain());
-              } finally {
-                setBusy(false);
-              }
-            }}
-          >
-            {busy ? "確認中…" : "改ざんがないか確認"}
-          </button>
-        }
       >
+        <AuditVerificationControl />
         <p className="mb-3 text-[12px] leading-relaxed text-paper-dim">
           1件ごとに直前の記録のハッシュを含めているため、途中を書き換えたり抜いたりすると
           つながりが合わなくなります。5分ごとに別の保存先へ末尾を記録します。直近の未記録部分の削除や、両方の保存先が改変された場合まで検出を保証するものではありません。対象企業名などの詳細は暗号化して保存しています。
         </p>
-        {chain && (
-          <Note tone={chain.ok ? "ok" : "alert"}>
-            {chain.ok
-              ? `${chain.checked} 件の連鎖と、独立保存済みの地点が一致しました。`
-              : `検査未完了または不一致：${chain.reason}`}
-          </Note>
-        )}
 
         <div className="mt-4">
           <Sec>サインインと解錠の履歴</Sec>

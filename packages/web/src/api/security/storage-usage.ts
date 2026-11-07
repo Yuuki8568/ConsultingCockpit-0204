@@ -132,10 +132,6 @@ export function summarizeStorageUsage(
       capacity("sync-records", "現在の同期の総レコード上限", records.totalCount, 1000, "records", "削除済みレコードも含む、現在のアプリの安全上限です。D1自体の保存可能件数ではありません。"),
       capacity("sync-payload", "現在の同期の容量判定", nonnegativeInteger(records.totalEncryptedBytes + records.totalCount * SYNC_ROW_OVERHEAD), 16 * 1024 * 1024, "bytes", "暗号文・IVに1レコードあたり1KiBの安全余白を加えた、アプリの判定値です。実際の保存容量ではありません。鍵変更には別の小さい送信上限があります。"),
     );
-    limits.push(
-      capacity("audit-records", "全監査検証の件数上限", audit.count, 10000, "records", "上限を超える前にページ単位の全件検証への移行が必要です。記録自体の上限ではありません。"),
-      capacity("audit-payload", "全監査検証の詳細容量上限", audit.ciphertextBytes, 16 * 1024 * 1024, "bytes", "監査記録の暗号化詳細の容量です。現在のアプリの全件検証の上限で、DB全体の容量上限ではありません。"),
-    );
   }
   return {
     backend,
