@@ -1,7 +1,8 @@
-import { and, eq, gt } from "drizzle-orm";
+import { and, eq, gt, lte } from "drizzle-orm";
 import { db, databaseContext } from "../database";
 import * as s from "../database/schema";
 import { auditHash } from "./audit";
+import { selectWitnessPage, witnessPayloadBytes, witnessPageSizeGate, WITNESS_PAGE_ROWS } from "./witness-page";
 export type WitnessService = { fetch(request: Request): Promise<Response> };
 export async function witnessHead(userId: string) {
   const service = databaseContext.getStore()?.witness;
@@ -27,19 +28,31 @@ export async function publishWitnesses() {
   for (const head of heads) {
     const prior = await witnessHead(head.userId);
     if (prior.seq > head.seq) throw new Error("Audit tail missing");
-    if (prior.seq) {
-      const [row] = await db
-        .select()
+    // The anchor only needs its hash: fetching an already witnessed encrypted
+    // payload on every cron tick adds transfer without strengthening this check.
+    // Keep an unchanged tick to two DB calls; only a nonempty page loads payloads.
+    const [[anchor], metadata] = await db.batch([
+      db
+        .select({ hash: s.auditEvent.hash })
         .from(s.auditEvent)
-        .where(and(eq(s.auditEvent.userId, head.userId), eq(s.auditEvent.seq, prior.seq)));
-      if (row?.hash !== prior.hash) throw new Error("Audit checkpoint mismatch");
-    }
-    const rows = await db
-      .select()
-      .from(s.auditEvent)
-      .where(and(eq(s.auditEvent.userId, head.userId), gt(s.auditEvent.seq, prior.seq)))
-      .orderBy(s.auditEvent.seq)
-      .limit(1000);
+        .where(and(eq(s.auditEvent.userId, head.userId), eq(s.auditEvent.seq, prior.seq))),
+      db
+        .select({ seq: s.auditEvent.seq, hash: s.auditEvent.hash, bytes: witnessPayloadBytes })
+        .from(s.auditEvent)
+        .where(and(eq(s.auditEvent.userId, head.userId), gt(s.auditEvent.seq, prior.seq)))
+        .orderBy(s.auditEvent.seq)
+        .limit(WITNESS_PAGE_ROWS + 1),
+    ]);
+    if (prior.seq && anchor?.hash !== prior.hash)
+      throw new Error("Audit checkpoint mismatch");
+    const page = selectWitnessPage(metadata, prior.seq);
+    const rows = page.rows.length ? await db.select().from(s.auditEvent).where(and(
+      eq(s.auditEvent.userId, head.userId), gt(s.auditEvent.seq, prior.seq),
+      lte(s.auditEvent.seq, page.cursor), witnessPageSizeGate(head.userId, prior.seq, page.cursor),
+    )).orderBy(s.auditEvent.seq).limit(WITNESS_PAGE_ROWS) : [];
+    if (rows.length !== page.rows.length || rows.some((r, i) =>
+      r.seq !== page.rows[i].seq || r.hash !== page.rows[i].hash))
+      throw new Error("Audit page changed during verification");
     let seq = prior.seq,
       hash = prior.hash;
     for (const r of rows) {
@@ -49,8 +62,8 @@ export async function publishWitnesses() {
       hash = r.hash;
     }
     // The head is read before the page: concurrent appends may extend it, but
-    // a short page may never stop before the head we already observed.
-    if (seq < head.seq && rows.length < 1000) throw new Error("Audit tail missing");
+    // an exhausted metadata page cannot stop before the head already observed.
+    if (seq < head.seq && !page.hasMore) throw new Error("Audit tail missing");
     const observedHead = rows.find(r => r.seq === head.seq);
     if ((observedHead && observedHead.hash !== head.hash) ||
         (head.seq === prior.seq && head.hash !== prior.hash))

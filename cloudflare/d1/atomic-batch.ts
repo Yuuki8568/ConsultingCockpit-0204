@@ -6,7 +6,7 @@ import type {D1Database, D1PreparedStatement} from '@cloudflare/workers-types';
 export async function atomicCheckedBatch(db: D1Database, mutations: {
   statement: D1PreparedStatement; expectedChanges: number;
 }[]) {
-  if (!mutations.length || mutations.length > 64 || mutations.some(m =>
+  if (!mutations.length || mutations.length > 4096 || mutations.some(m =>
     !Number.isSafeInteger(m.expectedChanges) || m.expectedChanges < 0)) {
     throw new Error('Invalid atomic batch plan');
   }

@@ -1,8 +1,7 @@
 import { appendAudit } from "../security/audit";
 import { verifyWrite } from "./write-keys";
-import { ciphertextInput, ivInput } from "../security/inputs";
-import { archiveRecords, syncBudget } from "../security/controls";
-import { MAX_SYNC_RECORDS } from "../../shared/sync-limits";
+import { syncInput } from "../security/sync-input";
+import { archiveRecords, syncBudget, type Transaction } from "../security/controls";
 import { ORPCError } from "@orpc/server";
 import { and, eq, gt, inArray, sql } from "drizzle-orm";
 import { z } from "zod";
@@ -10,6 +9,7 @@ import { db } from "../database";
 import * as schema from "../database/schema";
 import { authed } from "../middleware/auth";
 import { classifySyncError } from "../sync-diagnostics";
+import { MAX_SYNC_PAGE_ROWS, selectSyncPage } from "../../shared/sync-page";
 
 /**
  * 差分同期。
@@ -18,31 +18,12 @@ import { classifySyncError } from "../sync-diagnostics";
  * ------------------------------------------------------------------
  * - クライアントは前回受け取った since（seq）を送る。サーバーはそれより新しい行だけ返す。
  * - 送信も同じ呼び出しで行う（push + pull を1往復にまとめる）。
- * - 競合はレコード単位の updatedAtMs 後勝ち。
+ * - 更新元の版がサーバーの版と一致する場合だけ採用する。
  *   ただし負けた版を捨てず conflict として返し、クライアント側で
  *   「競合コピー」レコードとして保存できるようにする。
  * - サーバーは ciphertext を一切解釈しない。中身が何かは分からない。
  */
 
-const recordInput = z.object({
-  operation:z.enum(["put","delete"]),
-  id: z.string().min(1).max(64),
-  type: z.enum(["case", "lead", "profile", "template", "meta", "log"]),
-  // 1件あたりの上限を置く（1MB ≒ 平文768KB目安）。上限がないと、
-  // 巨大な塊を積んで容量を食い潰す使い方ができてしまう。
-  // 書類を何度も生成した案件はレコードが大きく育つため、256KB では
-  // 途中で同期が恒久的に失敗する（2026-09-15 に再現確認）。
-  ciphertext: ciphertextInput,
-  iv: ivInput,
-  updatedAtMs: z.number().int(),
-  deleted: z.boolean().default(false),
-  /**
-   * この編集が元にしたサーバー版の seq。
-   * サーバーの現在の seq と一致していれば「相手の変更を見た上での編集」なので競合ではない。
-   * 一致しないときだけ、上書きされる側を競合コピーとして返す。
-   */
-  baseSeq: z.number().int().min(0).default(0),
-}).refine(r=>(r.operation==="delete")===r.deleted,"操作種別と削除状態が一致しません");
 
 async function assertDeviceActive(userId: string, deviceId: string) {
   const [d] = await db
@@ -62,19 +43,43 @@ async function assertDeviceActive(userId: string, deviceId: string) {
   }
 }
 
+/** Keep page selection and ciphertext reads in the same database snapshot. */
+async function readSyncPage(tx: Transaction, userId: string, since: number) {
+  const metadata = await tx
+    .select({
+      id: schema.record.id,
+      seq: schema.record.seq,
+      bytes: sql<number>`length(${schema.record.ciphertext}) + length(${schema.record.iv})`,
+    })
+    .from(schema.record)
+    .where(and(eq(schema.record.userId, userId), gt(schema.record.seq, since)))
+    .orderBy(schema.record.seq)
+    .limit(MAX_SYNC_PAGE_ROWS + 1);
+  let page;
+  try {
+    page = selectSyncPage(metadata, since);
+  } catch (error) {
+    if (error instanceof Error && error.message === "SYNC_PAGE_GROUP_TOO_LARGE")
+      throw new ORPCError("PAYLOAD_TOO_LARGE", {
+        message: "同じ同期番号の旧データが1回の取得上限を超えています。管理者による移行が必要です。",
+      });
+    throw error;
+  }
+  const rows = page.ids.length
+    ? await tx
+        .select()
+        .from(schema.record)
+        .where(and(eq(schema.record.userId, userId), inArray(schema.record.id, page.ids)))
+        .orderBy(schema.record.seq)
+    : [];
+  return { rows, cursor: page.cursor, hasMore: page.hasMore };
+}
+
 export const sync = {
   /** push + pull を1往復で行う */
   push: authed
     .input(
-      z.object({
-        proof:z.object({id:z.string().uuid(),signature:z.string().max(200)}).optional(),
-        // 端末IDは必須。省略できると、失効させた端末が「端末IDを付けない」だけで
-        // 失効判定を通り抜けてしまうため。
-        deviceId: z.string().min(4).max(64),
-        generation: z.number().int().min(1),
-        since: z.number().int().min(0).default(0),
-        records: z.array(recordInput).max(MAX_SYNC_RECORDS, "同期の更新が必要です。ページを再読み込みしてください。"),
-      }),
+      syncInput,
     )
     .handler(async ({ context, input }) => {
       const uid = context.user.id;
@@ -184,21 +189,7 @@ export const sync = {
 
       // pull: since より新しい行
       stage = "changed-records-read";
-      const changed = await tx
-        .select()
-        .from(schema.record)
-        .where(and(eq(schema.record.userId, uid), gt(schema.record.seq, input.since)))
-        .orderBy(schema.record.seq)
-        .limit(1000);
-
-      const cursor = changed.length > 0 ? changed[changed.length - 1].seq : input.since;
-      const fullPage = changed.length === 1000;
-      // Old releases used millisecond timestamps: include ties at a page boundary.
-      if (fullPage) {
-        const ties = await tx.select().from(schema.record).where(and(eq(schema.record.userId, uid), eq(schema.record.seq, cursor)));
-        const seen = new Set(changed.map(r => r.id));
-        changed.push(...ties.filter(r => !seen.has(r.id)));
-      }
+      const { rows: changed, cursor, hasMore } = await readSyncPage(tx, uid, input.since);
       const conflictIds = conflicts.map(c => c.id);
       if (conflictIds.length) {
         const current = await tx.select().from(schema.record).where(and(eq(schema.record.userId, uid), inArray(schema.record.id, conflictIds)));
@@ -230,7 +221,7 @@ export const sync = {
           seq: c.seq,
         })),
         cursor,
-        hasMore: fullPage,
+        hasMore,
       };
       });
       } catch (error) {
@@ -251,34 +242,34 @@ export const sync = {
     .input(
       z.object({
         deviceId: z.string().min(4).max(64),
-        after: z.number().int().default(0),
+        after: z.number().int().min(0).default(0),
       }),
     )
     .handler(async ({ context, input }) => {
       const uid = context.user.id;
       if(context.deviceId!==input.deviceId) throw new ORPCError("FORBIDDEN");
       await assertDeviceActive(uid, input.deviceId);
-      const rows = await db
-        .select()
-        .from(schema.record)
-        .where(and(eq(schema.record.userId, uid), gt(schema.record.seq, input.after)))
-        .orderBy(schema.record.seq)
-        .limit(1000);
-      const cursor = rows.length > 0 ? rows[rows.length - 1].seq : input.after;
-      return {
-        records: rows.map((c) => ({
-          id: c.id,
-          type: c.type,
-          ciphertext: c.ciphertext,
-          iv: c.iv,
-          updatedAtMs: c.updatedAtMs,
-          version: c.version,
-          deleted: c.deletedAt != null,
-          seq: c.seq,
-        })),
-        cursor,
-        hasMore: rows.length === 1000,
-      };
+      return db.transaction(async tx => {
+        const [bound] = await tx.select().from(schema.deviceSession).where(eq(schema.deviceSession.sessionId, context.session.id));
+        const [active] = await tx.select().from(schema.device).where(and(eq(schema.device.userId, uid), eq(schema.device.id, input.deviceId)));
+        if (bound?.deviceId !== input.deviceId || bound?.userId !== uid || !active || active.revokedAtMs)
+          throw new ORPCError("FORBIDDEN");
+        const { rows, cursor, hasMore } = await readSyncPage(tx, uid, input.after);
+        return {
+          records: rows.map((c) => ({
+            id: c.id,
+            type: c.type,
+            ciphertext: c.ciphertext,
+            iv: c.iv,
+            updatedAtMs: c.updatedAtMs,
+            version: c.version,
+            deleted: c.deletedAt != null,
+            seq: c.seq,
+          })),
+          cursor,
+          hasMore,
+        };
+      }, { behavior: "deferred" });
     }),
 
   /** 保存状況の概観（件数と最終更新）。中身は見えないので件数だけ。 */

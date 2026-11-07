@@ -1,3 +1,4 @@
+import { rekeyInput } from "../security/rekey-input";
 import { appendAudit } from "../security/audit";
 import { requireStepUp } from "../security/step-up";
 import { ciphertextInput, ivInput, saltInput } from "../security/inputs";
@@ -8,6 +9,7 @@ import { z } from "zod";
 import { db } from "../database";
 import * as schema from "../database/schema";
 import { authed } from "../middleware/auth";
+import { storageUsageQueries, summarizeStorageUsage } from "../security/storage-usage";
 
 /**
  * 金庫メタの管理。
@@ -25,6 +27,19 @@ const UNLOCK_PARAMS_MAX = 20;
 
 
 export const vault = {
+  /** Explicit request only: do not scan storage on ordinary status/sync calls. */
+  storageUsage: authed.handler(async ({ context }) => {
+    const uid = context.user.id;
+    const allowed = await db.transaction(tx => consumeLimit(tx, `storage-usage:${uid}`, 1, 3, 60_000));
+    if (!allowed) throw new ORPCError("TOO_MANY_REQUESTS", { message: "容量の集計が続いています。1分ほど待って再確認してください。" });
+    const queries = storageUsageQueries(uid);
+    return db.transaction(async tx => {
+      const [records] = await tx.all<Record<string, unknown>>(queries.records);
+      const [revisions] = await tx.all<Record<string, unknown>>(queries.revisions);
+      const [audit] = await tx.all<Record<string, unknown>>(queries.audit);
+      return summarizeStorageUsage("libsql", records, revisions, audit);
+    }, { behavior: "deferred" });
+  }),
   /**
    * 金庫の有無と、秘密にあたらない情報だけを返す。
    * 鍵の材料（salt・検証トークン）はここでは返さない。→ unlockParams
@@ -34,9 +49,10 @@ export const vault = {
       .select()
       .from(schema.vault)
       .where(eq(schema.vault.userId, context.user.id));
-    if (!v) return { exists: false as const };
+    if (!v) return { exists: false as const, storageBackend: "libsql" as "libsql" | "d1" };
     return {
       exists: true as const,
+      storageBackend: "libsql" as "libsql" | "d1",
       kdfAlgo: v.kdfAlgo,
       kdfIterations: v.kdfIterations,
       generation: v.generation,
@@ -123,17 +139,7 @@ export const vault = {
    * 途中で失敗して読めなくなることを避けるため、1トランザクションで置き換える。
    */
   rekey: authed
-    .input(z.object({
-      authorization: z.string().uuid().optional(),
-      writeKey:z.object({privateCiphertext:ciphertextInput,privateIv:ivInput,expectedVersion:z.number().int().positive()}).optional(),
-      expectedGeneration: z.number().int().min(1),
-      kdfSalt: saltInput,
-      kdfIterations: z.number().int().min(100_000).max(2_000_000),
-      verifierCiphertext: ciphertextInput,
-      verifierIv: ivInput,
-      records: z.array(z.object({ id: z.string().max(200), ciphertext: ciphertextInput,
-        iv: ivInput, baseSeq: z.number().int().min(0) })).max(5000),
-    }))
+    .input(rekeyInput)
     .handler(async ({ context, input }) => db.transaction(async tx => {
       const uid = context.user.id;
       await requireStepUp(tx,uid,context.session.id,"vault:rekey",input,input.authorization);

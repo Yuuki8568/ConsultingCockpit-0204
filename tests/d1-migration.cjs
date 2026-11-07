@@ -1,0 +1,90 @@
+// Synthetic local libSQL -> local D1 only. No external credentials or production data.
+const assert=require('node:assert/strict'),fs=require('node:fs');
+const dep=require('node:module').createRequire(require.resolve('wrangler'));
+const {build}=dep('esbuild'),{Miniflare,convertV4MiniflareOptions}=dep('miniflare');
+const {createClient}=require('@libsql/client');
+(async()=>{
+ const output='packages/web/tests/.d1-migration-test.mjs';
+ await build({stdin:{contents:`export {runMigrationOnce,RECEIPT_SCHEMA,default as maintenanceWorker} from './security-ops/d1-maintenance.ts';export {auditHash} from './packages/web/src/api/security/audit.ts';export {copyToEmptyD1} from './packages/web/src/api/database/d1/migration.ts'`,resolveDir:process.cwd(),loader:'ts'},bundle:true,platform:'node',format:'esm',packages:'external',outfile:output});
+ const {auditHash,copyToEmptyD1,runMigrationOnce,RECEIPT_SCHEMA,maintenanceWorker}=await import(require('node:url').pathToFileURL(require('node:path').resolve(output)));
+ const mf=new Miniflare(convertV4MiniflareOptions({modules:true,script:'export default {fetch(){return new Response("test")}}',compatibilityDate:'2026-10-17',d1Databases:['GOOD','ROLLBACK','RACE','TAMPER','WRONG','ONCE','SOURCE_CHANGED','AUDIT_FAIL','AUDIT_GOOD']}));
+ const temporary=fs.mkdtempSync('/tmp/cockpit-d1-copy-');
+ const source=createClient({url:'file:'+temporary+'/source.sqlite'});
+ try{
+ const schema=fs.readFileSync('cloudflare/d1/business-schema.sql','utf8');await source.executeMultiple(schema);
+ const ddl=(schema+fs.readFileSync('cloudflare/d1/schema.sql','utf8')).replace(/--[^\n]*/g,'').split(';').map(s=>s.trim()).filter(Boolean);
+ const databases={};for(const name of ['GOOD','ROLLBACK','RACE','TAMPER','WRONG','ONCE','SOURCE_CHANGED','AUDIT_FAIL','AUDIT_GOOD']){const db=await mf.getD1Database(name);await db.batch(ddl.map(s=>db.prepare(s)));databases[name]=db;}
+ const exec=(sql,...args)=>source.execute({sql,args});
+ const now=Date.now(),cipher=Buffer.alloc(32,1).toString('base64'),iv=Buffer.alloc(12,2).toString('base64');
+ await exec('INSERT INTO user(id,name,email,email_verified,created_at,updated_at) VALUES (?,?,?,1,?,?)','owner','synthetic','owner@example.invalid',now,now);
+ await exec('INSERT INTO account(id,account_id,provider_id,user_id,access_token,created_at,updated_at) VALUES (?,?,?,?,?,?,?)','google','synthetic-account','google','owner','synthetic-token-preserved',now,now);
+ await exec('INSERT INTO session(id,expires_at,token,created_at,updated_at,user_id) VALUES (?,?,?,?,?,?)','session',now+3600000,'synthetic-cookie-token',now,now,'owner');
+ await exec('INSERT INTO vault(user_id,kdf_salt,verifier_ciphertext,verifier_iv,created_at_ms,updated_at_ms) VALUES (?,?,?,?,?,?)','owner',cipher,cipher,iv,now,now);
+ await exec('INSERT INTO record(id,user_id,type,ciphertext,iv,updated_at_ms,version,seq) VALUES (?,?,?,?,?,?,1,1)','case','owner','case',cipher,iv,now);
+ await exec('INSERT INTO record_revision(id,user_id,record_id,archived_at_ms,snapshot) VALUES (?,?,?,?,?)','revision','owner','case',now,JSON.stringify({syntheticEncrypted:cipher}));
+ await exec('INSERT INTO passkey_credential(id,user_id,public_key,counter,fingerprint,created_at_ms) VALUES (?,?,?,?,?,?)','credential','owner','synthetic-public-key',7,'synthetic-fingerprint',now);
+ await exec('INSERT INTO security_counter(key,window_start,count) VALUES (?,?,?)','unlock:owner',now,21);
+ const zeroWitness={async fetch(){return Response.json({seq:0,hash:'GENESIS'})}};
+ const options={maintenanceConfirmed:true,ownerEmails:['owner@example.invalid'],witness:zeroWitness};
+ await assert.rejects(copyToEmptyD1(source,databases.GOOD,{...options,maintenanceConfirmed:false}),/MAINTENANCE_REQUIRED/);
+ await assert.rejects(copyToEmptyD1(source,databases.GOOD,{...options,ownerEmails:['outsider@example.invalid']}),/OWNER_MISMATCH/);
+ const result=await copyToEmptyD1(source,databases.GOOD,options);assert.equal(result.verified,true);assert.equal(result.cutover,false);assert.equal(result.manifest.length,18);
+ assert.equal((await databases.GOOD.prepare('SELECT ciphertext FROM record').first()).ciphertext,cipher);
+ assert.equal((await databases.GOOD.prepare('SELECT access_token FROM account').first()).access_token,'synthetic-token-preserved');
+ assert.equal((await databases.GOOD.prepare('SELECT counter FROM passkey_credential').first()).counter,7);
+ assert.equal((await databases.GOOD.prepare('SELECT count FROM security_counter').first()).count,21);
+ await assert.rejects(copyToEmptyD1(source,databases.GOOD,options),/DESTINATION_NOT_EMPTY/);
+ await databases.ROLLBACK.exec("CREATE TRIGGER synthetic_failure BEFORE INSERT ON record_revision BEGIN SELECT RAISE(ABORT,'test failure'); END");
+ await assert.rejects(copyToEmptyD1(source,databases.ROLLBACK,options));
+ assert.equal((await databases.ROLLBACK.prepare('SELECT count(*) n FROM user').first()).n,0);
+ assert.equal((await databases.ROLLBACK.prepare('SELECT count(*) n FROM record').first()).n,0);
+ assert.equal((await databases.ROLLBACK.prepare('SELECT count(*) n FROM cockpit_atomic_assertion').first()).n,0);
+ let calls=0;
+ const race=new Proxy(databases.RACE,{get(t,k){if(k==='batch')return async statements=>{if(++calls===3)await t.prepare('INSERT INTO security_counter(key,window_start,count) VALUES (?,0,1)').bind('concurrent').run();return t.batch(statements)};const v=t[k];return typeof v==='function'?v.bind(t):v}});
+ await assert.rejects(copyToEmptyD1(source,race,options));assert.equal((await databases.RACE.prepare('SELECT count(*) n FROM user').first()).n,0);
+ assert.equal((await databases.RACE.prepare('SELECT count(*) n FROM security_counter').first()).n,1);
+ calls=0;const tamper=new Proxy(databases.TAMPER,{get(t,k){if(k==='batch')return async statements=>{const result=await t.batch(statements);if(++calls===3)await t.prepare("UPDATE record SET ciphertext='synthetic-tampered'").run();return result};const v=t[k];return typeof v==='function'?v.bind(t):v}});
+ await assert.rejects(copyToEmptyD1(source,tamper,options),/READBACK_MISMATCH/);
+ calls=0;const sourceChanged=new Proxy(databases.SOURCE_CHANGED,{get(t,k){if(k==='batch')return async statements=>{const result=await t.batch(statements);if(++calls===3)await exec("UPDATE record SET ciphertext='source-wrote-after-snapshot'");return result};const v=t[k];return typeof v==='function'?v.bind(t):v}});
+ await assert.rejects(copyToEmptyD1(source,sourceChanged,options),/SOURCE_CHANGED/);
+ await exec('UPDATE record SET ciphertext=?',cipher);
+ await databases.WRONG.exec('ALTER TABLE record ADD COLUMN unknown_column TEXT');await assert.rejects(copyToEmptyD1(source,databases.WRONG,options),/DESTINATION_SCHEMA_MISMATCH/);
+ assert.equal((await exec('SELECT ciphertext FROM record')).rows[0].ciphertext,cipher);
+ assert.equal((await exec('SELECT counter FROM passkey_credential')).rows[0].counter,7);
+ for(const path of ['/','/api/auth/get-session','/api/rpc/vault/status','/api/rpc/sync/push']){const r=await maintenanceWorker.fetch(new Request('https://example.invalid'+path));assert.equal(r.status,503);assert.equal(r.headers.get('cache-control'),'no-store');}
+ await databases.ONCE.exec(RECEIPT_SCHEMA);
+ assert.deepEqual(await runMigrationOnce(source,databases.ONCE,options.ownerEmails,zeroWitness),{started:true,verified:true});
+ assert.deepEqual(await runMigrationOnce(source,databases.ONCE,options.ownerEmails,zeroWitness),{started:false});
+ const receipt=await databases.ONCE.prepare('SELECT status,manifest FROM cockpit_cutover_receipt').first();assert.equal(receipt.status,'verified');assert.equal(JSON.parse(receipt.manifest).cutover,false);
+ assert.ok(!receipt.manifest.includes('synthetic-cookie-token'));assert.ok(!receipt.manifest.includes('synthetic-token-preserved'));
+ await databases.ROLLBACK.exec(RECEIPT_SCHEMA);
+ assert.deepEqual(await runMigrationOnce(source,databases.ROLLBACK,options.ownerEmails,zeroWitness),{started:true,verified:false});
+ assert.equal((await databases.ROLLBACK.prepare('SELECT status FROM cockpit_cutover_receipt').first()).status,'failed');
+ assert.deepEqual(await runMigrationOnce(source,databases.ROLLBACK,options.ownerEmails,zeroWitness),{started:false});
+ const failureReceipt=await databases.ROLLBACK.prepare('SELECT manifest FROM cockpit_cutover_receipt').first();assert.equal(JSON.parse(failureReceipt.manifest).error_code,'MIGRATION_FAILED');assert.ok(!failureReceipt.manifest.includes('test failure'));
+ const oldEnv={WEBSITE_URL:process.env.WEBSITE_URL,DATABASE_URL:process.env.DATABASE_URL,DATABASE_AUTH_TOKEN:process.env.DATABASE_AUTH_TOKEN,OWNER_EMAILS:process.env.OWNER_EMAILS,MIGRATION_NOT_BEFORE:process.env.MIGRATION_NOT_BEFORE};
+ Object.assign(process.env,{WEBSITE_URL:'https://cockpit.yamashirogyomukaizen.com',DATABASE_URL:'libsql://unused.invalid',DATABASE_AUTH_TOKEN:'synthetic',OWNER_EMAILS:'owner@example.invalid',MIGRATION_NOT_BEFORE:String(Date.now()+120000)});
+ assert.deepEqual(await maintenanceWorker.scheduled({}, {MIGRATION_TARGET:databases.AUDIT_FAIL,AUDIT_WITNESS:zeroWitness}),{waiting:true});
+ for(const [key,value] of Object.entries(oldEnv)){if(value===undefined)delete process.env[key];else process.env[key]=value;}
+ const event={hashVersion:2,userId:'owner',seq:1,action:'synthetic-test',atMs:now,deviceId:null,payloadCiphertext:null,payloadIv:null,prevHash:'GENESIS'};
+ const hash=await auditHash(event);
+ await exec('INSERT INTO audit_event(id,user_id,seq,action,at_ms,prev_hash,hash,hash_version) VALUES (?,?,?,?,?,?,?,?)','event','owner',1,event.action,now,'GENESIS',hash,2);
+ await exec('INSERT INTO audit_head(user_id,seq,hash) VALUES (?,?,?)','owner',1,hash);
+ const anchored={async fetch(){return Response.json({seq:1,hash})}};
+ const wrongAnchor={async fetch(){return Response.json({seq:1,hash:'a'.repeat(64)})}};
+ await assert.rejects(copyToEmptyD1(source,databases.AUDIT_FAIL,{...options,witness:wrongAnchor}),/AUDIT_WITNESS_MISMATCH/);
+ await exec("UPDATE audit_event SET action='tampered'");await assert.rejects(copyToEmptyD1(source,databases.AUDIT_FAIL,{...options,witness:anchored}),/AUDIT_CHAIN_INVALID/);
+ await exec('UPDATE audit_event SET action=?',event.action);
+ await exec('UPDATE audit_head SET seq=2');await assert.rejects(copyToEmptyD1(source,databases.AUDIT_FAIL,{...options,witness:anchored}),/AUDIT_HEAD_MISMATCH/);
+ await exec('UPDATE audit_head SET seq=1');
+ let witnesses=0;const changesAnchor={async fetch(){return Response.json(++witnesses===1?{seq:1,hash}:{seq:2,hash})}};
+ await assert.rejects(copyToEmptyD1(source,databases.AUDIT_FAIL,{...options,witness:changesAnchor}),/AUDIT_WITNESS_MISMATCH/); // post-copy recheck
+ assert.equal((await copyToEmptyD1(source,databases.AUDIT_GOOD,{...options,witness:anchored})).verified,true);
+ await exec('UPDATE record SET ciphertext=?','x'.repeat(1900001));
+ await assert.rejects(copyToEmptyD1(source,databases.GOOD,options),/D1_ROW_TOO_LARGE/);
+ await exec('UPDATE record SET ciphertext=?',cipher);
+ await exec('ALTER TABLE record ADD COLUMN unexpected TEXT');
+ await assert.rejects(copyToEmptyD1(source,databases.GOOD,options),/SOURCE_SCHEMA_MISMATCH/);
+ console.log('PASS D1 migration: all-table schema and readback hashes, owner/maintenance gates, ciphertext and auth metadata preservation, nonempty/racing target refusal, atomic rollback, post-copy tamper detection, unchanged source');
+ }finally{source.close();fs.rmSync(temporary,{recursive:true,force:true});await mf.dispose();fs.rmSync(output,{force:true})}
+})().catch(e=>{console.error(e);process.exitCode=1});

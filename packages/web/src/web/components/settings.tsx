@@ -1,6 +1,7 @@
 import { PasskeyPanel } from "./passkey-panel";
 import { authorize } from "../lib/step-up";
 import { rewrapWriteKey } from "../lib/write-signing";
+import { assertRekeyCapacity } from "../../shared/rekey-capacity";
 /** 設定 — 受託者プロフィール／書類雛形／文面ライブラリ／紹介／保全／端末／監査／取込 */
 import { useEffect, useRef, useState } from "react";
 import { useVault } from "../hooks/use-vault";
@@ -38,6 +39,7 @@ import { deviceIdFor, vaultStore } from "../lib/store/vault-store";
 import { useDesktop } from "../hooks/use-desktop";
 import { AutomaticBackupSettings } from "./automatic-backup";
 import { DesktopBackup } from "./desktop-backup";
+import { StorageUsagePanel } from "./storage-usage";
 
 type Tab = "profile" | "templates" | "messages" | "referrals" | "security" | "data";
 
@@ -717,14 +719,19 @@ function RekeyModal({ open, onClose }: { open: boolean; onClose: () => void }) {
       const newKeys = await deriveVaultKeys(n1, salt, SEC_CONFIG.KDF_ITERATIONS);
       const verifier = await buildVerifier(newKeys.vaultKey);
       // レコードと録画を新しい鍵で封じ直す（録画は仮チャンクとして置く）
-      prepared = await vaultStore.prepareReencrypt(newKeys.vaultKey, newKeys.macKey);
-      const request = {
+      const envelope = {
         writeKey: await rewrapWriteKey(oldKeys.vaultKey,newKeys.vaultKey),
-        expectedGeneration: prepared.generation,
         kdfSalt: salt,
         kdfIterations: SEC_CONFIG.KDF_ITERATIONS,
         verifierCiphertext: verifier.ciphertext,
         verifierIv: verifier.iv,
+      };
+      prepared = await vaultStore.prepareReencrypt(newKeys.vaultKey, newKeys.macKey, undefined,
+        candidate => assertRekeyCapacity({ ...envelope, expectedGeneration: candidate.generation,
+          records: candidate.records }, st.storageBackend));
+      const request = {
+        ...envelope,
+        expectedGeneration: prepared.generation,
         records: prepared.records,
       };
       await vaultStore.saveRekeyRequest(request);
@@ -742,7 +749,7 @@ function RekeyModal({ open, onClose }: { open: boolean; onClose: () => void }) {
       setN1("");
       setN2("");
     } catch (e) {
-      // 失敗した場合は仮チャンクを捨てて、今の鍵・データは元のままにする
+      // 応答消失はロールバックを意味しない。旧・新原本と復旧情報を保全する。
       await vaultStore.abortReencrypt().catch(() => undefined);
       setMsg({
         tone: "alert",
@@ -832,6 +839,48 @@ function RekeyModal({ open, onClose }: { open: boolean; onClose: () => void }) {
       </div>
     </Modal>
   );
+}
+
+function StorageBackendNotice() {
+  const [backend, setBackend] = useState<"libsql" | "d1" | null>(null);
+  useEffect(() => {
+    let disposed = false;
+    let requestId = 0;
+    const refresh = () => {
+      const current = ++requestId;
+      setBackend(null);
+      if (!navigator.onLine || document.visibilityState !== "visible") return;
+      void client.vault.status().then((status) => {
+        if (disposed || current !== requestId || !navigator.onLine) return;
+        // Older deployments may omit this field. Never infer a completed cutover.
+        setBackend(status.storageBackend === "d1" || status.storageBackend === "libsql"
+          ? status.storageBackend : null);
+      }).catch(() => {
+        if (!disposed && current === requestId) setBackend(null);
+      });
+    };
+    refresh();
+    window.addEventListener("online", refresh);
+    window.addEventListener("offline", refresh);
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      disposed = true;
+      requestId++;
+      window.removeEventListener("online", refresh);
+      window.removeEventListener("offline", refresh);
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, []);
+  return <>
+    <li>{backend === "d1"
+      ? "案件・リード・文字起こし本文は、この端末で暗号化し、Cloudflare D1へ同期します。接続先の応答でD1の利用を確認しています。"
+      : backend === "libsql"
+        ? "案件・リード・文字起こし本文は、この端末で暗号化し、既存のサーバーDBへ同期します。この接続先はまだCloudflare D1へ切り替わっていません。"
+        : "案件・リード・文字起こし本文は、この端末で暗号化して同期する仕組みです。現在のサーバー保存先は確認できていません。オンラインで再接続すると確認します。"}</li>
+    <li>監査記録の照合情報は、業務データとは独立したCloudflare D1へ保存する構成です。</li>
+  </>;
 }
 
 function DataTab() {
@@ -982,13 +1031,13 @@ function DataTab() {
 
       <Panel title="保存先と端末間の同期" note="案件本文の暗号化と、録音・動画原本の保管は別の仕組みです。">
         <ul className="list-disc space-y-2 pl-5 text-sm">
-          <li>案件・リード・文字起こし本文は、この端末で暗号化し、既存のサーバーDBへ同期します。業務データのCloudflare D1移行はまだ完了していません。</li>
-          <li>Cloudflare D1は現在、監査記録の照合情報の保存に利用しています。</li>
+          <StorageBackendNotice />
           <li>認証・端末・更新日時などの管理情報は、業務本文と同じ暗号化の対象ではありません。</li>
           <li>別端末へ移る前に「同期済み」を確認してください。未送信データがある間は、ブラウザーの保存データを削除しないでください。</li>
           <li>録音・動画原本は自動同期されません。バックアップ先フォルダーへの保存と、Google Driveへの転送完了も別です。</li>
         </ul>
       </Panel>
+      <StorageUsagePanel />
       <PasskeyPanel /><AutomaticBackupSettings />
       <DesktopBackup />
 
