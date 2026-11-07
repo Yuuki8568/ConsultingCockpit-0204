@@ -25,6 +25,10 @@ export interface DocViewerDoc {
   docNo: string;
   /** 書き出しファイル名用の会社名 */
   company: string;
+  /** 締結済み本文は表示・出力のみ */
+  readOnly?: boolean;
+  releaseBlocked?: string;
+  templateVersion?: string;
 }
 
 /** 金庫側への保存関数（案件内の当該書類の content を更新する） */
@@ -69,6 +73,7 @@ class DocViewerStore {
 
   /** 編集のたびに表示を更新し、金庫への保存は800msデバウンスで行う */
   setContent(next: string): void {
+    if (this.doc?.readOnly) return;
     this.content = next;
     this.emit();
     if (this.persistTimer) clearTimeout(this.persistTimer);
@@ -84,7 +89,7 @@ class DocViewerStore {
       clearTimeout(this.persistTimer);
       this.persistTimer = null;
     }
-    if (!this.doc || !this.persistFn) return;
+    if (!this.doc || this.doc.readOnly || !this.persistFn) return;
     try {
       this.persistFn(this.content);
       trace("doc_persist", { docId: this.doc.docId });

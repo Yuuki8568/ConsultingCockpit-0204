@@ -11,7 +11,7 @@ import {
   SALES_STAGES,
 } from "../../domain/data/sales";
 import { calcPipelineForecast, calcPipelineVelocity } from "../../domain/logic/sales";
-import { formatYen } from "../../domain/logic/pricing";
+import { formatYen, legacyNetToGross } from "../../domain/logic/pricing";
 
 export function LeadDashboard() {
   const { state, mutate } = useVault();
@@ -99,7 +99,7 @@ export function LeadDashboard() {
 
   // 継続で入ってくる月額の合計
   const recurring = cases.reduce(
-    (a, c) => a + (c.support?.contract?.monthlyFee ?? 0),
+    (a, c) => a + legacyNetToGross(c.support?.contract?.monthlyFee ?? 0),
     0,
   );
   const engaged = leads.filter((l) => l.funnelStatus === "engaged").length;
@@ -112,7 +112,7 @@ export function LeadDashboard() {
 
   return (
     <div className="space-y-4">
-      <Panel title="いま見えている売上（期待）" note="未受注リードの想定金額に、ステージごとの確度を掛けた見込みです。受注済みの金額は下の「受注済みと期待の分離」に集計しています。">
+      <Panel title="いま見えている売上（期待）" note="未受注リードの保存済み想定金額（税区分未確認）に、ステージごとの確度を掛けた見込みです。税込額の確定値ではありません。受注済みの金額は下の「受注済みと期待の分離」に集計しています。">
         <Grid cols={4}>
           <Stat
             label="確度を掛けた見込み"
@@ -133,7 +133,7 @@ export function LeadDashboard() {
           <Stat
             label="継続で入る月額"
             value={<Mask>¥{formatYen(recurring)}</Mask>}
-            sub={`年換算 ¥${formatYen(recurring * 12)}`}
+            sub={`税込・年換算 ¥${formatYen(recurring * 12)}`}
             color="#3B6E8F"
           />
         </Grid>
@@ -185,26 +185,26 @@ export function LeadDashboard() {
           const agreed = cases.filter((cc) => cc.fde?.priceStatus === "agreed");
           const oneShot = agreed
             .filter((cc) => cc.fde?.productKind !== "monthly")
-            .reduce((a, cc) => a + (cc.fde?.contractAmount ?? 0), 0);
+            .reduce((a, cc) => a + legacyNetToGross(cc.fde?.contractAmount ?? 0), 0);
           const monthlyAgreed = agreed
             .filter((cc) => cc.fde?.productKind === "monthly")
-            .reduce((a, cc) => a + (cc.fde?.contractAmount ?? 0), 0);
+            .reduce((a, cc) => a + legacyNetToGross(cc.fde?.contractAmount ?? 0), 0);
           return (
             <Grid cols={4}>
               <Stat
-                label="受注済み（単発の合計）"
+                label="受注済み（単発・税込合計）"
                 value={<Mask>¥{formatYen(oneShot)}</Mask>}
                 sub={`合意済み ${agreed.filter((cc) => cc.fde?.productKind !== "monthly").length} 件`}
                 color="#4A7C59"
               />
               <Stat
-                label="受注済み（継続の月額）"
+                label="受注済み（継続・税込月額）"
                 value={<Mask>¥{formatYen(monthlyAgreed + recurring)}</Mask>}
-                sub="月次運用＋継続サポート"
+                sub="月次運用＋継続サポート（税込）"
                 color="#3B6E8F"
               />
               <Stat
-                label="期待売上（確度加重）"
+                label="期待売上（税区分未確認・確度加重）"
                 value={<Mask>¥{formatYen(forecast.weighted)}</Mask>}
                 sub="未受注のリードのみ。受注済みは含まない"
                 color="#C9A961"

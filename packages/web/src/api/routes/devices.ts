@@ -1,8 +1,11 @@
+import { appendAudit } from "../security/audit";
+import { ORPCError } from "@orpc/server";
+import { requireStepUp } from "../security/step-up";
 import { and, count, desc, eq, gte, ne } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "../database";
 import * as schema from "../database/schema";
-import { authed, recentlyAuthed } from "../middleware/auth";
+import { authed } from "../middleware/auth";
 
 /** 端末管理とログイン履歴。v3 のログイン履歴に「端末の失効」を追加したもの。 */
 export const devices = {
@@ -10,26 +13,34 @@ export const devices = {
   register: authed
     .input(
       z.object({
+        authorization: z.string().uuid().optional(),
         id: z.string().min(4).max(64),
         label: z.string().max(80),
         platform: z.string().max(40),
         userAgent: z.string().max(400).optional(),
       }),
     )
-    .handler(async ({ context, input }) => {
+    .handler(async ({ context, input }) => db.transaction(async tx => {
       const now = Date.now();
-      const [existing] = await db
+      const [binding] = await tx.select().from(schema.deviceSession).where(eq(schema.deviceSession.sessionId,context.session.id));
+      if(binding && (binding.userId!==context.user.id || binding.deviceId!==input.id)) throw new ORPCError("FORBIDDEN");
+      if(!binding) {
+        await requireStepUp(tx,context.user.id,context.session.id,"device:register",input,input.authorization);
+        await tx.insert(schema.deviceSession).values({sessionId:context.session.id,userId:context.user.id,deviceId:input.id,createdAtMs:now});
+      }
+      const [existing] = await tx
         .select()
         .from(schema.device)
         .where(and(eq(schema.device.userId, context.user.id), eq(schema.device.id, input.id)));
+      if(existing?.revokedAtMs) throw new ORPCError("FORBIDDEN",{message:"この端末は失効しています"});
       if (existing) {
-        await db
+        await tx
           .update(schema.device)
           .set({ lastSeenAtMs: now, label: input.label, userAgent: input.userAgent ?? null })
           .where(eq(schema.device.id, input.id));
         return { ok: true, revoked: existing.revokedAtMs != null };
       }
-      await db.insert(schema.device).values({
+      await tx.insert(schema.device).values({
         id: input.id,
         userId: context.user.id,
         label: input.label,
@@ -38,8 +49,9 @@ export const devices = {
         createdAtMs: now,
         lastSeenAtMs: now,
       });
+      await appendAudit(tx,context.user.id,input.id,"device:register");
       return { ok: true, revoked: false };
-    }),
+    })),
 
   list: authed.handler(({ context }) =>
     db
@@ -57,45 +69,14 @@ export const devices = {
    * 履歴や端末一覧を読めてしまうのを避けるため。
    * 手元の端末は続けて使えるが、他の端末は次から再サインインが必要になる。
    */
-  revoke: authed
-    .input(z.object({ id: z.string().min(1).max(200) }))
-    .handler(async ({ context, input }) => {
-      await db
-        .update(schema.device)
-        .set({ revokedAtMs: Date.now() })
-        .where(and(eq(schema.device.userId, context.user.id), eq(schema.device.id, input.id)));
-      const currentSessionId = context.session?.id;
-      if (currentSessionId) {
-        await db
-          .delete(schema.session)
-          .where(
-            and(
-              eq(schema.session.userId, context.user.id),
-              ne(schema.session.id, currentSessionId),
-            ),
-          );
-      } else {
-        await db.delete(schema.session).where(eq(schema.session.userId, context.user.id));
-      }
-      return { ok: true };
-    }),
-
-  unrevoke: recentlyAuthed
-    .input(z.object({ id: z.string() }))
-    .handler(async ({ context, input }) => {
-      await db
-        .update(schema.device)
-        .set({ revokedAtMs: null })
-        .where(and(eq(schema.device.userId, context.user.id), eq(schema.device.id, input.id)));
-      return { ok: true };
-    }),
-
-  remove: authed.input(z.object({ id: z.string() })).handler(async ({ context, input }) => {
-    await db
-      .delete(schema.device)
-      .where(and(eq(schema.device.userId, context.user.id), eq(schema.device.id, input.id)));
-    return { ok: true };
-  }),
+  revoke: authed.input(z.object({id:z.string().min(1).max(200),authorization:z.string().uuid().optional()})).handler(async({context,input})=> revokeDevice(context.user.id,context.session.id,input,"device:revoke")),
+  remove: authed.input(z.object({id:z.string().min(1).max(200),authorization:z.string().uuid().optional()})).handler(async({context,input})=> revokeDevice(context.user.id,context.session.id,input,"device:remove")),
+  unrevoke: authed.input(z.object({id:z.string().min(1).max(200),authorization:z.string().uuid().optional()})).handler(async({context,input})=>db.transaction(async tx=>{
+    await requireStepUp(tx,context.user.id,context.session.id,"device:unrevoke",input,input.authorization);
+    await tx.update(schema.device).set({revokedAtMs:null}).where(and(eq(schema.device.userId,context.user.id),eq(schema.device.id,input.id)));
+    await appendAudit(tx,context.user.id,context.deviceId,"device:unrevoke");
+    return {ok:true};
+  })),
 
   /** ログイン・解錠イベントの記録 */
   logLogin: authed
@@ -154,7 +135,18 @@ export const devices = {
     ),
 
   clearLoginHistory: authed.handler(async ({ context }) => {
-    await db.delete(schema.loginEvent).where(eq(schema.loginEvent.userId, context.user.id));
+    await db.transaction(async tx=>{await tx.delete(schema.loginEvent).where(eq(schema.loginEvent.userId,context.user.id));await appendAudit(tx,context.user.id,context.deviceId,"history:clear");});
     return { ok: true };
   }),
 };
+
+async function revokeDevice(uid:string,sid:string,input:{id:string;authorization?:string},action:string) {
+ return db.transaction(async tx=>{
+  await requireStepUp(tx,uid,sid,action,input,input.authorization);
+  await tx.update(schema.device).set({revokedAtMs:Date.now()}).where(and(eq(schema.device.userId,uid),eq(schema.device.id,input.id)));
+  const [own]=await tx.select().from(schema.deviceSession).where(eq(schema.deviceSession.sessionId,sid));
+  await tx.delete(schema.session).where(own?.deviceId===input.id ? eq(schema.session.userId,uid) : and(eq(schema.session.userId,uid),ne(schema.session.id,sid)));
+  await appendAudit(tx,uid,own?.deviceId??null,action);
+  return {ok:true};
+ });
+}

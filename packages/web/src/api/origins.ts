@@ -55,6 +55,5 @@ export function allowedOrigins(): string[] {
 export function isAllowedOrigin(origin: string | null | undefined): boolean {
   if (!origin) return true;
   if (origin === "null") return false;
-  if (origin === "runable-consult-rjau47t://") return true; // exact native client origin
   return allowedOrigins().includes(origin);
 }

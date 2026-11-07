@@ -16,7 +16,7 @@ export const GARTNER_DEFS = {
     nextMove:'まず属人化解消・マニュアル化・運用台帳。AIは「補助輪」レベルで導入',
     state:'今ある業務を守る段階。既存資産の保全とコスト最適化が主目的',
     action:'属人化の解消・マニュアル化・運用台帳の整備から始める',
-    price:'AI業務診断（ライト）5万円〜（税抜・2026-07-25確定料金）'
+    price:'AI業務診断（ライト）5.5万円〜（税込・2026-07-25確定料金）'
   },
   Extend: {
     label:'Extend（拡張）', icon:'🌱', color:'#c9a961',
@@ -26,7 +26,7 @@ export const GARTNER_DEFS = {
     nextMove:'プロンプト集・ワークフロー自動化・部分的AI業務代行で生産性を底上げ',
     state:'今の延長線上で業務を拡げる段階。効率化・スピード化が主目的',
     action:'プロンプト集とワークフロー自動化を整え、標準化して横展開する',
-    price:'設計＋伴走 月15万円〜（税抜・2026-07-25確定料金）'
+    price:'設計＋伴走 月16.5万円〜（税込・2026-07-25確定料金）'
   },
   Transform: {
     label:'Transform（転換）', icon:'🚀', color:'#4a7c59',
@@ -49,17 +49,17 @@ export const PRICING_PRESETS = {
   training: { title:'社内研修（半日／1日）', hours:12, baseline:12500, difficulty:3, urgency:'normal', clientSize:'medium', experience:'yes', scopeRisk:'low', payment:'immediate', decisionMakers:'few', deliverables:['training','prompts'], duration:'short' }
 };
 
-// 料金の正本は service-menu.ts（2026-07-25確定・税抜）。こちらは成熟度ステージ表示用の目安レンジ。
+// 料金の正本は service-menu.ts（2026-07-25確定料金を税込表示（2026-10-23））。こちらの数値は旧積算互換の税抜保存値。表示時のみ税込換算する。
 export const STAGE_PRICE_RANGE = {
   Defend:    { name:'AI業務診断（ライト）', lo:50000,  std:50000,   hi:80000,    desc:'現状把握・AI適性診断・優先順位づけ（1〜2週間／単発）',
                why:'守りを固める段階。最初から大規模投資すると現場が崩れる。まず1件で型を作る。',
-               upCond:'対象業務を2件以上に拡張する場合は ¥80,000〜', monthly:'月¥80,000〜（定着サポート）' },
+               upCond:'対象業務を2件以上に拡張する場合は ¥88,000〜（税込）', monthly:'月¥88,000〜（税込・定着サポート）' },
   Extend:    { name:'設計＋伴走（1ヶ月）', lo:150000, std:150000,  hi:180000,   desc:'部門展開・標準化・運用台帳作成（月20〜30時間）',
                why:'1部署の型を横展開する段階。標準化と運用台帳が無いと崩れるので、設計と伴走をセットで。',
-               upCond:'対象業務3件以上は ¥200,000〜／緊急度高は +20%', monthly:'月¥80,000〜（継続伴走）' },
+               upCond:'対象業務3件以上は ¥220,000〜（税込）／緊急度高は +20%', monthly:'月¥88,000〜（税込・継続伴走）' },
   Transform: { name:'集中伴走（3ヶ月）', lo:550000, std:600000,  hi:800000,  desc:'フロー再設計・AIリーダー育成・新フロー設計（月60〜100時間）',
                why:'業務そのものを作り変える段階。リーダー育成と新フロー設計に時間がかかるので3ヶ月単位。',
-               upCond:'多部署横断は ¥800,000〜／要件未確定は要件定義フェーズを別途', monthly:'月¥80,000〜100,000（卒業後の定着サポート）' }
+               upCond:'多部署横断は ¥880,000〜（税込）／要件未確定は要件定義フェーズを別途', monthly:'月¥88,000〜110,000（税込・卒業後の定着サポート）' }
 };
 
 export const LEGAL_CHECKLIST_ITEMS = {
