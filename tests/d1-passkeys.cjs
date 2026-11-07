@@ -4,8 +4,8 @@ const web=require('node:module').createRequire(require('node:path').resolve('pac
 const {build}=dep('esbuild'),{Miniflare,convertV4MiniflareOptions}=dep('miniflare'),{chromium}=web('@playwright/test');
 (async()=>{
  Object.assign(process.env,{NODE_ENV:'production',WEBSITE_URL:'https://cockpit.example.invalid',OWNER_EMAILS:'owner@example.invalid',BETTER_AUTH_SECRET:'isolated-http-test-secret-not-for-production-000000000000',GOOGLE_CLIENT_ID:'synthetic',GOOGLE_CLIENT_SECRET:'synthetic'});process.env.COCKPIT_APPROVED_PASSKEYS='[]';
- const b=await build({stdin:{contents:`export {publishWitnessesD1} from './packages/web/src/api/database/d1/witness.ts';export {createD1Api} from './packages/web/src/api/database/d1/http.ts';export {mutateDeviceD1} from './packages/web/src/api/database/d1/devices.ts';export {registerWriteKeyD1,writeChallengeD1} from './packages/web/src/api/database/d1/write-keys.ts';export {pushD1} from './packages/web/src/api/database/d1/sync.ts';export {operationHash,signingMessage} from './packages/web/src/shared/operation-proof.ts'`,resolveDir:process.cwd(),loader:'ts'},bundle:true,platform:'node',format:'esm',packages:'external',outfile:'packages/web/tests/.d1-http-test.mjs'});
- const {publishWitnessesD1,createD1Api,mutateDeviceD1,operationHash,signingMessage,registerWriteKeyD1,writeChallengeD1,pushD1}=await import(require('node:url').pathToFileURL(require('node:path').resolve('packages/web/tests/.d1-http-test.mjs')));
+ const b=await build({stdin:{contents:`export {auditHash} from './packages/web/src/api/security/audit.ts';export {publishWitnessesD1} from './packages/web/src/api/database/d1/witness.ts';export {createD1Api} from './packages/web/src/api/database/d1/http.ts';export {mutateDeviceD1} from './packages/web/src/api/database/d1/devices.ts';export {registerWriteKeyD1,writeChallengeD1} from './packages/web/src/api/database/d1/write-keys.ts';export {pushD1} from './packages/web/src/api/database/d1/sync.ts';export {operationHash,signingMessage} from './packages/web/src/shared/operation-proof.ts'`,resolveDir:process.cwd(),loader:'ts'},bundle:true,platform:'node',format:'esm',packages:'external',outfile:'packages/web/tests/.d1-http-test.mjs'});
+ const {auditHash,publishWitnessesD1,createD1Api,mutateDeviceD1,operationHash,signingMessage,registerWriteKeyD1,writeChallengeD1,pushD1}=await import(require('node:url').pathToFileURL(require('node:path').resolve('packages/web/tests/.d1-http-test.mjs')));
  const mf=new Miniflare(convertV4MiniflareOptions({modules:true,script:'export default {fetch(){return new Response("test")}}',compatibilityDate:'2026-10-17',d1Databases:['DB']}));
  let browser;
  try{
@@ -97,6 +97,34 @@ const {build}=dep('esbuild'),{Miniflare,convertV4MiniflareOptions}=dep('miniflar
  await publishWitnessesD1(db,witness);assert.equal((await rpc('audit/verifyChain')).ok,true);
  await run("UPDATE audit_event SET payload_iv='tampered' WHERE seq=?",entry.seq);assert.equal((await rpc('audit/verifyChain')).ok,false);
  await run('UPDATE audit_event SET payload_iv=? WHERE seq=?',iv,entry.seq);
+ // Exercise more than 100 authenticated page requests, not just the verifier
+ // in isolation. This catches session/rate-limit/HTTP adapter regressions.
+ const prior=await one("SELECT seq,hash FROM audit_head WHERE user_id='owner'");
+ let lastSeq=prior.seq,lastHash=prior.hash,pending=[];
+ for(let n=prior.seq+1;n<=10025;n++){
+   const row={id:'paged-'+n,userId:'owner',seq:n,action:'synthetic-page',atMs:now,
+     deviceId:null,payloadCiphertext:null,payloadIv:null,prevHash:lastHash,hashVersion:2};
+   const h=await auditHash(row);
+   pending.push(db.prepare('INSERT INTO audit_event(id,user_id,seq,action,at_ms,prev_hash,hash,hash_version) VALUES (?,?,?,?,?,?,?,2)')
+     .bind(row.id,'owner',n,row.action,now,lastHash,h));
+   lastSeq=n;lastHash=h;
+   if(pending.length===100){await db.batch(pending);pending=[];}
+ }
+ if(pending.length)await db.batch(pending);
+ await run("UPDATE audit_head SET seq=?,hash=? WHERE user_id='owner'",lastSeq,lastHash);
+ anchor={seq:lastSeq,hash:lastHash}; // Synthetic independent service fixture only.
+ let auditCursor,auditPages=0,auditResult;
+ do{
+   auditResult=await rpc('audit/verifyChain',auditCursor?{cursor:auditCursor}:undefined);auditPages++;
+   if(!auditResult.complete){assert.equal(auditResult.ok,false);assert.ok(auditResult.cursor);}
+   if(auditPages===1){
+     const forged=await rpc('audit/verifyChain',{cursor:auditResult.cursor+'invalid'});
+     assert.equal(forged.ok,false);assert.equal(forged.cursor,undefined);
+   }
+   auditCursor=auditResult.cursor;
+ }while(auditCursor&&auditPages<110);
+ assert.equal(auditResult.ok,true);assert.equal(auditResult.checked,10025);assert.equal(auditPages,101);
+ console.log('PASS D1 authenticated audit HTTP: 10,025 events, 101 pages, forged cursor rejected');
  await assert.rejects(rpc('audit/truncateOldest',{keepLatest:100}));await assert.rejects(rpc('sync/purgeDeleted',{olderThanDays:1}));
  const oversize=await app.request('/api/rpc/sync/push',{method:'POST',headers,body:JSON.stringify({json:'x'.repeat(4*1024*1024)})});assert.equal(oversize.status,413);
  const revoked=await assertion();await run('UPDATE device SET revoked_at_ms=? WHERE id=?',now,input.id);await assert.rejects(keys.authenticate(revoked));
