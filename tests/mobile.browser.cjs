@@ -60,4 +60,5 @@ for(const width of [360,412,1280]){
  console.log('PASS responsive navigation, sync label, settings, onboarding:',width);await page.close();
 }
 }finally{if(browser)await browser.close();server.kill();for(const f of [html,entry])fs.rmSync(path.join(cwd,f),{force:true});}
+await require('./idb-snapshot.browser.cjs')();
 })().catch(e=>{console.error(e);process.exitCode=1});

@@ -84,8 +84,49 @@ export interface MediaChunkRow {
   data: ArrayBuffer;
 }
 
-function recordSignature(rows: LocalRecord[]): string {
-  return JSON.stringify([...rows].sort((a, b) => a.id.localeCompare(b.id)));
+/**
+ * Compare every stored row in the same transaction as the writes, without a
+ * second full-store clone or vault-sized JSON strings. LocalRecord fields are
+ * scalars; shallow copies pin the caller's expected values before the first await.
+ * Comparing one complete row at a time also covers fields this version does not use.
+ */
+async function updateRecordSnapshot(
+  before: LocalRecord[],
+  write: (store: IDBObjectStore) => void,
+): Promise<void> {
+  const conflictMessage = "別の処理が保存内容を変更しました。再度お試しください";
+  const expected = new Map(before.map(row => [row.id, { ...row }]));
+  if (expected.size !== before.length) throw new Error(conflictMessage);
+  const db = await openDb();
+  await new Promise<void>((resolve, reject) => {
+    const t = db.transaction(STORE_RECORDS, "readwrite");
+    const store = t.objectStore(STORE_RECORDS);
+    const request = store.openCursor();
+    let conflict = false;
+    const abort = () => { try { t.abort(); } catch { /* Already aborted. */ } };
+    request.onsuccess = () => {
+      try {
+        const cursor = request.result;
+        if (cursor) {
+          const previous = expected.get(cursor.primaryKey as string);
+          if (!previous || JSON.stringify(cursor.value) !== JSON.stringify(previous)) {
+            conflict = true; abort(); return;
+          }
+          expected.delete(cursor.primaryKey as string);
+          cursor.continue();
+        } else if (expected.size) {
+          conflict = true; abort();
+        } else {
+          // No clear/put occurs until the complete snapshot matches. IndexedDB
+          // serializes other writers through this transaction's commit/abort.
+          write(store);
+        }
+      } catch { abort(); }
+    };
+    t.oncomplete = () => resolve();
+    t.onabort = () => reject(new Error(conflict ? conflictMessage : "保存できませんでした。元データは保持されています"));
+    t.onerror = () => reject(t.error ?? new Error("保存できませんでした。元データは保持されています"));
+  });
 }
 
 export interface DirtySyncBatch {
@@ -99,42 +140,13 @@ export const idb = {
   /** Preserve the full snapshot CAS, but write only changed rows on normal edits. */
   async patchRecords(before: LocalRecord[], changes: LocalRecord[]): Promise<void> {
     if (!changes.length) return;
-    const expected = recordSignature(before);
-    const db = await openDb();
-    await new Promise<void>((resolve, reject) => {
-      const t = db.transaction(STORE_RECORDS, "readwrite");
-      const s = t.objectStore(STORE_RECORDS);
-      const req = s.getAll();
-      let conflict = false;
-      req.onsuccess = () => {
-        if (recordSignature(req.result) !== expected) {
-          conflict = true;
-          t.abort();
-          return;
-        }
-        changes.forEach(r => s.put(r));
-      };
-      t.oncomplete = () => resolve();
-      t.onabort = () => reject(new Error(conflict ? "別の処理が保存内容を変更しました。再度お試しください" : "保存できませんでした。元データは保持されています"));
-      t.onerror = () => reject(t.error);
-    });
+    await updateRecordSnapshot(before, store => { changes.forEach(row => store.put(row)); });
   },
   /** Compare-and-swap the entire snapshot in one transaction; never clear first. */
   async replaceRecords(before: LocalRecord[], after: LocalRecord[]): Promise<void> {
-    const db = await openDb();
-    await new Promise<void>((resolve, reject) => {
-      const t = db.transaction(STORE_RECORDS, "readwrite");
-      const s = t.objectStore(STORE_RECORDS);
-      const req = s.getAll();
-      let conflict = false;
-      req.onsuccess = () => {
-        if (recordSignature(req.result) !== recordSignature(before)) { conflict = true; t.abort(); return; }
-        s.clear();
-        after.forEach(r => s.put(r));
-      };
-      t.oncomplete = () => resolve();
-      t.onabort = () => reject(new Error(conflict ? "別の処理が保存内容を変更しました。再度お試しください" : "保存できませんでした。元データは保持されています"));
-      t.onerror = () => reject(t.error);
+    await updateRecordSnapshot(before, store => {
+      store.clear();
+      after.forEach(row => store.put(row));
     });
   },
   /** Atomic media replacement. Readers see the old complete file or the new one. */
