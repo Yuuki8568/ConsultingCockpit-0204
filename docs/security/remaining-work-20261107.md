@@ -1,5 +1,7 @@
 # Cockpit 残件再点検（2026-11-07 JST）
 
+本書は11月7日時点の記録。11月10日の追加改善と残件は[最新の記録](remaining-work-20261110.md)、本番画面の確認完了は[PR #19の追記](https://github.com/Yuuki8568/ConsultingCockpit-0204/pull/19)を参照する。
+
 ## 本番と整理結果
 
 - PR #17は15:00 JSTにマージ済み。`ea4210fa10f98618978325d433e4d813f4409cad` から既存のCloudflare Buildsが自動配備し、15:01 JSTに完了した。

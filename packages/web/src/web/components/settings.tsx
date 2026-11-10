@@ -53,8 +53,9 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "data", label: "取込・書き出し" },
 ];
 
-export function SettingsModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+export function SettingsModal({ open, onClose, initialTab = "profile" }: { open: boolean; onClose: () => void; initialTab?: "profile" | "data" }) {
   const [tab, setTab] = useState<Tab>("profile");
+  useEffect(() => { if (open) setTab(initialTab); }, [open, initialTab]);
   return (
     <Modal open={open} onClose={onClose} title="設定" wide>
       <Tabs tabs={TABS} active={tab} onChange={setTab} />

@@ -13,7 +13,7 @@ import { Mask } from "./mask";
 
 interface ShellProps {
   children: React.ReactNode;
-  onOpenSettings: () => void;
+  onOpenSettings: (section?: "data") => void;
   onOpenActions: () => void;
   onNewCase: () => void;
   onNewLead: () => void;
@@ -187,7 +187,7 @@ export function Shell({
           <div className="flex-1" />
 
           <SyncBadge />
-          <BackupBadge onOpenSettings={onOpenSettings} />
+          <BackupBadge onOpenSettings={() => onOpenSettings("data")} />
 
           <button
             className={`btn btn-sm ${masked ? "btn-primary" : ""}`}
@@ -208,7 +208,7 @@ export function Shell({
           </div>
         )}
         {sync.state === "error" && (
-          <div className="border-b border-alert/35 bg-alert/10 px-4 py-2 text-[12px] text-alert">
+          <div role="alert" className="border-b border-alert/35 bg-alert/10 px-4 py-2 text-[12px] text-alert">
             同期できていません：{sync.lastError}
             {sync.pending > 0 && (
               <>
@@ -216,6 +216,8 @@ export function Shell({
                 未送信 <span className="num">{sync.pending}</span> 件は端末内に保持しています。
               </>
             )}
+            <p className="mt-2">再ログイン後に接続が拒否された場合は、承認済みパスキーで「本人確認してこの端末を登録」を実行してください。エラーが続いても、ブラウザーの保存データは消さないでください。</p>
+            <button className="btn btn-sm mt-2" onClick={() => onOpenSettings("data")}>同期・端末の設定を開く</button>
           </div>
         )}
 
