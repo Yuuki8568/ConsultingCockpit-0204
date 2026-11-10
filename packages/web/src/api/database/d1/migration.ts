@@ -4,44 +4,11 @@
  */
 import type { Client, Transaction } from "@libsql/client";
 import type { D1Database } from "@cloudflare/workers-types";
-import { getTableConfig } from "drizzle-orm/sqlite-core";
-import * as s from "../schema";
+import { migrationDefinitions as definitions } from "./migration-schema";
 import { auditHash } from "../../security/audit";
 import { witnessHeadD1, type WitnessService } from "./witness";
 import { atomicCheckedBatch } from "../../../../../../cloudflare/d1/atomic-batch";
 
-// Foreign-key parents first. Identifiers are exclusively schema-owned, never user SQL.
-const tables = [
-  s.user,
-  s.account,
-  s.session,
-  s.verification,
-  s.rateLimit,
-  s.vault,
-  s.record,
-  s.device,
-  s.deviceSession,
-  s.loginEvent,
-  s.auditEvent,
-  s.auditHead,
-  s.passkeyCredential,
-  s.securityChallenge,
-  s.stepUpTicket,
-  s.securityCounter,
-  s.writeIdentity,
-  s.recordRevision,
-];
-const definitions = tables.map((t) => {
-  const c = getTableConfig(t);
-  return {
-    name: c.name,
-    columns: c.columns.map((x) => x.name),
-    keys: [
-      ...c.columns.filter((x) => x.primary).map((x) => x.name),
-      ...c.primaryKeys.flatMap((k) => k.columns.map((x) => x.name)),
-    ],
-  };
-});
 const quote = (name: string) => '"' + name.replaceAll('"', '""') + '"';
 type Cell = string | number | null;
 type Snapshot = { name: string; columns: string[]; keys: string[]; rows: Cell[][]; digest: string };
