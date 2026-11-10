@@ -85,6 +85,7 @@ const {createClient}=require('@libsql/client');
  await exec('UPDATE record SET ciphertext=?',cipher);
  await exec('ALTER TABLE record ADD COLUMN unexpected TEXT');
  await assert.rejects(copyToEmptyD1(source,databases.GOOD,options),/SOURCE_SCHEMA_MISMATCH/);
+ await require('./d1-free-preflight.cjs')();
  console.log('PASS D1 migration: all-table schema and readback hashes, owner/maintenance gates, ciphertext and auth metadata preservation, nonempty/racing target refusal, atomic rollback, post-copy tamper detection, unchanged source');
  }finally{source.close();fs.rmSync(temporary,{recursive:true,force:true});await mf.dispose();fs.rmSync(output,{force:true})}
 })().catch(e=>{console.error(e);process.exitCode=1});
