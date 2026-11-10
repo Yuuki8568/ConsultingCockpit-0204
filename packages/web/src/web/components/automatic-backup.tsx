@@ -1,4 +1,4 @@
-import { useEffect, useState, useSyncExternalStore } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { vaultStore } from '../lib/store/vault-store';
 import { useVault } from '../hooks/use-vault';
 import { archiveOriginal, validateOriginalSelection, archiveMatchingOriginals, backupWarningKey, backupSupported, chooseBackupFolder, getBackupConfig, getBackupRunning, pauseBackup, permitBackup, runBackup, type BackupConfig } from '../lib/backup/automatic';
@@ -24,15 +24,40 @@ export function BackupBadge({ onOpenSettings }: { onOpenSettings: () => void }) 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [checked, setChecked] = useState<{ revision: number; hash: string }>();
+  // Keep one snapshot in flight; newer edits replace the pending check before
+  // it clones the vault. A cancelled digest cannot be stopped by WebCrypto.
+  const checks = useRef<{ running: boolean; pending?: () => Promise<void> }>({ running: false });
   useEffect(() => {
     let active = true;
-    const state = vaultStore.getState();
-    if (phase === 'unlocked' && state) {
-      // Hash the exact snapshot; an edit during hashing cannot mark newer data saved.
-      void vaultStore.backupFingerprint(structuredClone(state)).then(hash => { if (active) setChecked({ revision, hash }); }).catch(() => { if (active) setChecked(undefined); });
+    const queue = checks.current;
+    queue.pending = undefined;
+    if (phase === 'unlocked' && config?.enabled && config.snapshotHash) {
+      queue.pending = async () => {
+        if (!active || vaultStore.getRevision() !== revision) return;
+        try {
+          const state = vaultStore.getState();
+          if (!state) return;
+          // Pin the exact snapshot only when this check starts. Never compare
+          // a stale digest with a newer revision or reuse it after locking.
+          const hash = await vaultStore.backupFingerprint(structuredClone(state));
+          if (active && vaultStore.getRevision() === revision) setChecked({ revision, hash });
+        } catch { if (active) setChecked(undefined); }
+      };
+      const drain = async () => {
+        if (queue.running) return;
+        queue.running = true;
+        try {
+          while (queue.pending) {
+            const check = queue.pending;
+            queue.pending = undefined;
+            await check();
+          }
+        } finally { queue.running = false; }
+      };
+      void drain();
     } else setChecked(undefined);
-    return () => { active = false; };
-  }, [phase, revision]);
+    return () => { active = false; queue.pending = undefined; };
+  }, [phase, revision, config?.enabled, config?.snapshotHash]);
   if (phase !== 'unlocked') return null;
   const dirty = !config?.snapshotHash || checked?.revision !== revision || checked?.hash !== config.snapshotHash;
   const failed = !!error || !!config?.missing || !!config?.message?.includes('未完了');

@@ -12,6 +12,7 @@ import { makeEmptyCase } from "../domain/logic/state";
 function Index() {
   const { phase, state, mutate } = useVault();
   const [settings, setSettings] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<"profile" | "data">("profile");
   const [actions, setActions] = useState(false);
 
   if (phase !== "unlocked" || !state) return <Gate />;
@@ -34,7 +35,7 @@ function Index() {
   return (
     <>
       <Shell
-        onOpenSettings={() => setSettings(true)}
+        onOpenSettings={(section) => { setSettingsTab(section ?? "profile"); setSettings(true); }}
         onOpenActions={() => setActions(true)}
         onNewCase={newCase}
         onNewLead={newLead}
@@ -47,7 +48,7 @@ function Index() {
           <OfficePage />
         )}
       </Shell>
-      <SettingsModal open={settings} onClose={() => setSettings(false)} />
+      <SettingsModal open={settings} initialTab={settingsTab} onClose={() => setSettings(false)} />
       <ActionsHub open={actions} onClose={() => setActions(false)} />
     </>
   );

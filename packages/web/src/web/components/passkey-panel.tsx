@@ -9,6 +9,7 @@ export function PasskeyPanel() {
   const [message, setMessage] = useState("");
   const run = async (fn: () => Promise<void>) => {
     setBusy(true);
+    setMessage("");
     try {
       await fn();
     } catch (e) {
@@ -24,12 +25,13 @@ export function PasskeyPanel() {
         <p className="text-xs text-paper-dim">
           初回はパスキー登録後、管理者が照合番号を別途確認します。承認後にこの端末を登録し、金庫の解錠後に書き込み署名を有効にしてください。
         </p>
+        <p className="text-xs text-paper-dim">再ログイン後にも端末の本人確認が必要です。承認済みパスキーが使える場合は、作り直さず「本人確認してこの端末を登録」を押してください。解錠済みなら、そのまま同期を再試行します。</p>
         <details className="w-full text-sm text-paper-dim">
           <summary className="cursor-pointer py-3">MacとAndroidで使う手順</summary>
           <ol className="list-decimal space-y-2 pl-5">
             <li>AndroidのChromeで同じCockpitアカウントにログインします。</li>
             <li>使える承認済みパスキーがある場合は「本人確認してこの端末を登録」を押します。見つからない場合は、この端末でパスキーを追加登録し、表示された照合番号を管理者へ伝えてください。</li>
-            <li>承認後に端末登録し、再読み込みして同じ金庫のパスフレーズで解錠します。</li>
+            <li>承認後に端末登録し、まだ施錠中なら同じ金庫のパスフレーズで解錠します。</li>
             <li>既存の書き込み署名は金庫の解錠後に利用できます。初回設定が必要と表示された場合だけ、下の有効化ボタンを使ってください。</li>
           </ol>
           <p className="mt-3">Googleパスワードマネージャーに保存したパスキーは、対応するMac版ChromeとAndroidで同期して利用できます。Appleのパスワードに保存したものがAndroidにも自動で届くとは限りません。</p>
@@ -64,7 +66,12 @@ export function PasskeyPanel() {
                 ...input,
                 authorization: await authorize("device:register", input),
               });
-              setMessage("端末登録が完了しました。ページを再読み込みしてください。");
+              if (vaultStore.isUnlocked()) {
+                await vaultStore.sync();
+                setMessage("端末の本人確認が完了しました。画面上部の同期状態を確認してください。");
+              } else {
+                setMessage("端末の本人確認が完了しました。金庫を解錠してください。");
+              }
             })
           }
         >
