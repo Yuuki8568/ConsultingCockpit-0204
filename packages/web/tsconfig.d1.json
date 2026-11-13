@@ -5,6 +5,7 @@
     "tests/generate-d1-schema.ts",
     "../../security-ops/d1-maintenance.ts",
     "../../security-ops/d1-free-preflight.ts",
-    "../../security-ops/d1-bounded-reader.ts"
+    "../../security-ops/d1-bounded-reader.ts",
+    "../../security-ops/d1-copy-checkpoint.ts"
   ]
 }
