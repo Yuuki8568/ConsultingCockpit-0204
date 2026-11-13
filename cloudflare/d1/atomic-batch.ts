@@ -3,7 +3,7 @@ import type {D1Database, D1PreparedStatement} from '@cloudflare/workers-types';
  * The caller must verify signatures and compile trusted SQL; no user SQL accepted.
  * Requires schema.sql in the target. Never fall back to sequential .run().
  */
-export async function atomicCheckedBatch(db: D1Database, mutations: {
+export async function atomicCheckedBatch(db: Pick<D1Database, 'prepare' | 'batch'>, mutations: {
   statement: D1PreparedStatement; expectedChanges: number;
 }[]) {
   if (!mutations.length || mutations.length > 4096 || mutations.some(m =>
