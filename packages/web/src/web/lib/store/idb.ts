@@ -84,24 +84,69 @@ export interface MediaChunkRow {
   data: ArrayBuffer;
 }
 
+/**
+ * Compare every stored row in the same transaction as the writes, without a
+ * second full-store clone or vault-sized JSON strings. LocalRecord fields are
+ * scalars; shallow copies pin the caller's expected values before the first await.
+ * Comparing one complete row at a time also covers fields this version does not use.
+ */
+async function updateRecordSnapshot(
+  before: LocalRecord[],
+  write: (store: IDBObjectStore) => void,
+): Promise<void> {
+  const conflictMessage = "別の処理が保存内容を変更しました。再度お試しください";
+  const expected = new Map(before.map(row => [row.id, { ...row }]));
+  if (expected.size !== before.length) throw new Error(conflictMessage);
+  const db = await openDb();
+  await new Promise<void>((resolve, reject) => {
+    const t = db.transaction(STORE_RECORDS, "readwrite");
+    const store = t.objectStore(STORE_RECORDS);
+    const request = store.openCursor();
+    let conflict = false;
+    const abort = () => { try { t.abort(); } catch { /* Already aborted. */ } };
+    request.onsuccess = () => {
+      try {
+        const cursor = request.result;
+        if (cursor) {
+          const previous = expected.get(cursor.primaryKey as string);
+          if (!previous || JSON.stringify(cursor.value) !== JSON.stringify(previous)) {
+            conflict = true; abort(); return;
+          }
+          expected.delete(cursor.primaryKey as string);
+          cursor.continue();
+        } else if (expected.size) {
+          conflict = true; abort();
+        } else {
+          // No clear/put occurs until the complete snapshot matches. IndexedDB
+          // serializes other writers through this transaction's commit/abort.
+          write(store);
+        }
+      } catch { abort(); }
+    };
+    t.oncomplete = () => resolve();
+    t.onabort = () => reject(new Error(conflict ? conflictMessage : "保存できませんでした。元データは保持されています"));
+    t.onerror = () => reject(t.error ?? new Error("保存できませんでした。元データは保持されています"));
+  });
+}
+
+export interface DirtySyncBatch {
+  records: LocalRecord[];
+  oversizedIds: string[];
+  moreDirty: boolean;
+  nextAfter?: string;
+}
+
 export const idb = {
+  /** Preserve the full snapshot CAS, but write only changed rows on normal edits. */
+  async patchRecords(before: LocalRecord[], changes: LocalRecord[]): Promise<void> {
+    if (!changes.length) return;
+    await updateRecordSnapshot(before, store => { changes.forEach(row => store.put(row)); });
+  },
   /** Compare-and-swap the entire snapshot in one transaction; never clear first. */
   async replaceRecords(before: LocalRecord[], after: LocalRecord[]): Promise<void> {
-    const db = await openDb();
-    await new Promise<void>((resolve, reject) => {
-      const t = db.transaction(STORE_RECORDS, "readwrite");
-      const s = t.objectStore(STORE_RECORDS);
-      const req = s.getAll();
-      let conflict = false;
-      req.onsuccess = () => {
-        const signature = (rows: LocalRecord[]) => JSON.stringify([...rows].sort((a,b) => a.id.localeCompare(b.id)));
-        if (signature(req.result) !== signature(before)) { conflict = true; t.abort(); return; }
-        s.clear();
-        after.forEach(r => s.put(r));
-      };
-      t.oncomplete = () => resolve();
-      t.onabort = () => reject(new Error(conflict ? "別の処理が保存内容を変更しました。再度お試しください" : "保存できませんでした。元データは保持されています"));
-      t.onerror = () => reject(t.error);
+    await updateRecordSnapshot(before, store => {
+      store.clear();
+      after.forEach(row => store.put(row));
     });
   },
   /** Atomic media replacement. Readers see the old complete file or the new one. */
@@ -140,9 +185,61 @@ export const idb = {
   allRecords(): Promise<LocalRecord[]> {
     return tx<LocalRecord[]>(STORE_RECORDS, "readonly", (s) => s.getAll());
   },
-  async dirtyRecords(): Promise<LocalRecord[]> {
-    const all = await idb.allRecords();
-    return all.filter((r) => r.dirty === 1);
+  dirtyRecords(): Promise<LocalRecord[]> {
+    return tx<LocalRecord[]>(STORE_RECORDS, "readonly", (s) => s.index("dirty").getAll(1));
+  },
+  dirtyRecordCount(): Promise<number> {
+    return tx<number>(STORE_RECORDS, "readonly", (s) => s.index("dirty").count(1));
+  },
+  /**
+   * Read only a bounded part of the dirty index, including when many rows are too
+   * large to send. The caller advances `after` only after a successful request.
+   * The in-memory cursor is an optimization, never a persistent sync cursor.
+   */
+  async dirtySyncBatch(options: {
+    maxRecords: number;
+    maxBytes: number;
+    maxCiphertext: number;
+    after?: string;
+  }): Promise<DirtySyncBatch> {
+    if (options.maxRecords < 1 || options.maxBytes < 1 || options.maxCiphertext < 1)
+      throw new Error("Invalid sync batch limits");
+    const db = await openDb();
+    return new Promise<DirtySyncBatch>((resolve, reject) => {
+      const t = db.transaction(STORE_RECORDS, "readonly");
+      const req = t.objectStore(STORE_RECORDS).index("dirty").openCursor(IDBKeyRange.only(1));
+      const batch: DirtySyncBatch = { records: [], oversizedIds: [], moreDirty: false };
+      let bytes = 0, scanned = 0;
+      req.onsuccess = () => {
+        const cursor = req.result;
+        if (!cursor) { batch.nextAfter = undefined; return; }
+        const id = String(cursor.primaryKey);
+        if (options.after && id <= options.after) {
+          if (id < options.after) cursor.continuePrimaryKey(1, options.after);
+          else cursor.continue();
+          return;
+        }
+        if (scanned >= 128) { batch.moreDirty = true; return; }
+        const row = cursor.value as LocalRecord;
+        if (row.ciphertext.length > options.maxCiphertext) {
+          if (batch.oversizedIds.length < 8) batch.oversizedIds.push(row.id);
+        } else {
+          const size = new TextEncoder().encode(JSON.stringify(row)).byteLength;
+          if (batch.records.length >= options.maxRecords || bytes + size > options.maxBytes) {
+            // A single unexpected oversized row must not block the rest forever.
+            if (!batch.records.length && size > options.maxBytes) {
+              if (batch.oversizedIds.length < 8) batch.oversizedIds.push(row.id);
+            } else { batch.moreDirty = true; return; }
+          } else { batch.records.push(row); bytes += size; }
+        }
+        scanned++;
+        batch.nextAfter = id;
+        cursor.continue();
+      };
+      t.oncomplete = () => resolve(batch);
+      t.onabort = () => reject(t.error ?? new Error("同期データの読み込みが中断されました"));
+      t.onerror = () => reject(t.error);
+    });
   },
   async deleteRecord(id: string): Promise<void> {
     await tx(STORE_RECORDS, "readwrite", (s) => s.delete(id));

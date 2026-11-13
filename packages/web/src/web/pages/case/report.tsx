@@ -15,7 +15,7 @@ import {
 import { Mask } from "../../components/mask";
 import { buildMonthlySummaryText, calculateROI } from "../../domain/logic/case";
 import { generateDocNo } from "../../domain/logic/docs";
-import { formatYen } from "../../domain/logic/pricing";
+import { formatYen, legacyNetToGross } from "../../domain/logic/pricing";
 import { safeFileName } from "../../domain/logic/util";
 import { downloadWord } from "../../lib/export/word";
 
@@ -26,14 +26,14 @@ export function CaseReport() {
 
   const reports = c.reports ?? [];
   const summary = buildMonthlySummaryText(c, state);
-  const supportMonthlyFee = c.support?.contract.monthlyFee || 0;
+  const supportMonthlyFee = legacyNetToGross(c.support?.contract.monthlyFee || 0);
 
   function addReport() {
     const now = new Date();
     const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
     const last = reports[reports.length - 1];
     // 支払の既定値: 前月分 → ⑧継続サポートの月額 → 0（未設定）。いずれも手で直せる
-    const feeDefault = last?.consultFee ?? supportMonthlyFee;
+    const feeDefault = last?.consultFeeTaxBasis === "gross" ? last.consultFee : supportMonthlyFee;
     void patch((x) =>
       x.reports.push({
         id: "R" + Date.now().toString(36),
@@ -44,6 +44,7 @@ export function CaseReport() {
         hourlyRate: last?.hourlyRate ?? 3000,
         casesPerMonth: last?.casesPerMonth ?? 0,
         consultFee: feeDefault,
+        consultFeeTaxBasis: "gross",
         issues: "",
         next: "",
         m1: "",
@@ -164,10 +165,11 @@ export function CaseReport() {
                         hint="クライアント側の人件費で置きます。"
                       />
                       <NumField
-                        label="こちらへの支払"
+                        label={r.consultFeeTaxBasis === "gross" ? "こちらへの支払（税込）" : "保存額（税区分未確認）"}
                         value={r.consultFee}
-                        onChange={(v) => void patch((x) => void (x.reports[idx].consultFee = v))}
+                        onChange={(v) => void patch((x) => { x.reports[idx].consultFee = v; x.reports[idx].consultFeeTaxBasis = "gross"; })}
                         suffix="円/月"
+                        hint="入力し直すと税込額として保存します。旧保存額は自動換算しません。"
                         step={10000}
                       />
                     </Grid>
@@ -190,7 +192,7 @@ export function CaseReport() {
                         />
                         <Stat
                           label="支払に対する比率"
-                          value={r.consultFee > 0 ? `${roi.roi}%` : "—"}
+                          value={r.consultFeeTaxBasis === "gross" && r.consultFee > 0 ? `${roi.roi}%` : "—"}
                           color={roi.roi >= 100 ? "#4A7C59" : roi.roi > 0 ? "#C9A961" : undefined}
                         />
                       </Grid>

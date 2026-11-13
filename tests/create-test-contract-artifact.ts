@@ -1,0 +1,10 @@
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { buildContractTestBundle } from '../packages/web/src/web/lib/export/contract-test';
+import { buildZip } from '../packages/web/src/web/lib/export/zip';
+import type { CaseRecord, VaultState } from '../packages/web/src/web/domain/types';
+const c={id:'test-only',settings:{},execution:{deliverables:[]},estimate:{},legalDocs:{},generatedDocs:[]} as unknown as CaseRecord;
+const state={profile:{},cases:[c],docTemplates:{}} as unknown as VaultState;
+const bundle=buildContractTestBundle(c,state,process.argv[2] || 'UNCOMMITTED-review-on-5150c1df',new Date(),'latest');
+const out=process.argv[3] || '/tmp/contract-test-output';mkdirSync(out,{recursive:true});
+for(const e of bundle.entries) writeFileSync(`${out}/${e.name}`,e.content);
+writeFileSync(`${out}/${bundle.fileName}`,buildZip(bundle.entries));console.log(`${out}/${bundle.fileName}`);

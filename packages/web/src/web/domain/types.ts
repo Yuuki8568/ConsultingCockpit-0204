@@ -442,6 +442,8 @@ export interface Execution {
 }
 
 export interface MonthlyReport {
+  /** 明示確認済みの税込報酬。旧記録は未設定のまま。 */
+  consultFeeTaxBasis?: "gross";
   id: string;
   month: string;
   highlights: string;
@@ -556,6 +558,10 @@ export interface NextAction {
 }
 
 export interface GeneratedDoc {
+  /** 新規生成時に固定。未承認版は本文編集で解除しない。 */
+  templateVersion?: string;
+  releaseBlocked?: string;
+  releaseBlockKind?: "case_facts_review";
   id: string;
   docType: string;
   docNo: string;
@@ -577,7 +583,45 @@ export interface Maturity {
   currentStage: MaturityStage;
 }
 
+export interface ContractFacts {
+  serviceRequestSummary?: string;
+  serviceScopeClassification?: "" | "business_improvement" | "general_information" | "application_preparation" | "application_submission" | "needs_review";
+  serviceScopeReviewEvidence?: string;
+  ndaCapBasis?: "" | "main_contract" | "standalone";
+  originalContractId?: string;
+  originalContractVersion?: string;
+  originalContractSignedOn?: string;
+  dpaImplementationEvidence?: string;
+  actualAcceptanceOn?: string;
+  completionSettlement?: string;
+  completionAiEvidence?: string;
+  completionEvidence?: string;
+  orderReceivedOn?: string;
+  transactionPurpose?: "" | "business" | "consumer";
+  legalApplicability?: string;
+  documentVersions?: string;
+  noticeDestination?: string;
+  noticeMethod?: string;
+  scopeAndDeliverables?: string;
+  acceptanceAndCompletion?: string;
+  pricingAndExpenses?: string;
+  informationManagement?: string;
+  retentionDeletion?: string;
+  aiUse?: "" | "none" | "processed" | "unprocessed";
+  aiServiceRecord?: string;
+  aiConsentEvidence?: string;
+  aiProtectionEvidence?: string;
+  liabilityAssessment?: string;
+  zeroLiability?: "" | "nonzero" | "zero_or_possible";
+  individualCapAgreement?: string;
+}
+
 export interface CaseRecord {
+  /** 案件別に確認した事実・合意。旧案件へ自動入力しない。 */
+  contractFacts?: ContractFacts;
+  contractActionEvidence?: import("./logic/contract-actions").ContractActionEvidence;
+  /** 明示的に選択した新規案件用の契約版。保存済み本文を移行しない。 */
+  contractTemplateVersion?: string;
   id: string;
   createdAt: string;
   updatedAt?: string;
@@ -651,6 +695,9 @@ export interface CaseRecord {
 
 /** 面談の録画・録音の属性。ファイル本体は含まない（端末ローカルの暗号化チャンクとして別保管） */
 export interface RecordingMeta {
+  /** 大容量原本は保管せず、選択されたファイルから直接読む */
+  sourceOnly?: boolean;
+  transcription?: import("../lib/transcription/checkpoint").TranscriptionCheckpoint;
   id: string;
   /** 元のファイル名 */
   name: string;
@@ -672,6 +719,8 @@ export interface RecordingMeta {
   /** 文字起こし本文（タイムスタンプ除去済みの平文） */
   transcript: string;
   transcriptAt: string;
+  localRecognition?: import("../lib/transcription/bridge").LocalTranscript;
+  transcriptReview?: import("../lib/transcription/review").TranscriptReview;
 }
 
 export type CaseStatus = "" | "active" | "paused" | "done" | "lost";

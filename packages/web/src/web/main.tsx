@@ -1,6 +1,6 @@
 // Entry point referenced by index.html — composition only, real bootstrap
 // lives in __main.tsx (template-managed).
-import { authClient } from "./lib/auth";
+
 
 // 描画以外で起きた例外（イベント処理・非同期）も控えに残す。
 // 「固まったように見えるが原因が分からない」を、あとから追える状態にしておく。
@@ -31,6 +31,6 @@ window.addEventListener("unhandledrejection", (e) => {
 });
 
 // 戻ってきた管理サインインを、画面を出す前に一度だけ完了させる
-await authClient.managedAuth.handleRedirect();
+
 
 import "./__main";

@@ -1,3 +1,4 @@
+import { bodyLimit } from "hono/body-limit";
 import { Hono } from "hono";
 import type { RouterClient } from "@orpc/server";
 import { createApp } from "./__core/app";
@@ -7,6 +8,8 @@ import { audit } from "./routes/audit";
 import { devices } from "./routes/devices";
 import { ping } from "./routes/ping";
 import { sync } from "./routes/sync";
+import { writeKeys } from "./routes/write-keys";
+import { passkeys } from "./routes/passkeys";
 import { vault } from "./routes/vault";
 
 // API features are oRPC procedures, one file per feature in ./routes/,
@@ -14,6 +17,8 @@ import { vault } from "./routes/vault";
 // (web: src/web/lib/api.ts, mobile: lib/api.ts).
 export const router = {
   ping,
+  passkeys,
+  writeKeys,
   vault,
   sync,
   devices,
@@ -43,6 +48,7 @@ app.on(["GET", "POST"], "/api/auth/*", (c) => auth.handler(c.req.raw));
 
 // Wrap the template app so denied origins never reach its reflecting CORS middleware.
 const guarded = new Hono();
+guarded.use("*",bodyLimit({maxSize:4*1024*1024,onError:c=>c.json({error:"送信データは4MiB以下にしてください"},413)}));
 guarded.use("*", async (c, next) => {
   const origin = c.req.header("origin");
   if (!isAllowedOrigin(origin)) return c.json({ error: "許可されていない接続元です。" }, 403);

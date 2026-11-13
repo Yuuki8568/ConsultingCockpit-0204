@@ -1,3 +1,4 @@
+import { PasskeyPanel } from "./passkey-panel";
 /**
  * 入口。Googleサインイン → 金庫の作成／解錠 まで。
  * この画面より先には、パスフレーズを入れないと進めない。
@@ -75,8 +76,8 @@ export function Gate() {
   }
   if (phase === "denied") return <Denied />;
   if (phase === "signed-out") return <SignIn />;
-  if (phase === "no-vault") return <CreateVault />;
-  return <Unlock initialError={error} />;
+  if (phase === "no-vault") return <><CreateVault /><PasskeyPanel /></>;
+  return <><Unlock initialError={error} /><PasskeyPanel /></>;
 }
 
 function Denied() {
@@ -106,8 +107,8 @@ function SignIn() {
   async function go() {
     setBusy(true);
     setErr(null);
-    const res = await authClient.managedAuth.signIn({ provider: "google" });
-    if (res.error && res.error.code !== "POPUP_CLOSED") {
+    const res = await authClient.signIn.social({ provider: "google", callbackURL: "/" });
+    if (res.error) {
       setErr(res.error.message ?? "サインインできませんでした");
     }
     setBusy(false);
