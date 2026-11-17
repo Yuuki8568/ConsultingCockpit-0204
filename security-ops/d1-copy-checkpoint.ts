@@ -8,10 +8,11 @@ import type { D1Database, D1DatabaseSession } from "@cloudflare/workers-types";
 import { migrationDefinitions as definitions } from "../packages/web/src/api/database/d1/migration-schema";
 import { atomicCheckedBatch } from "../cloudflare/d1/atomic-batch";
 import { readBoundedMigrationRow } from "./d1-bounded-reader";
+import { STREAM_FORMAT, streamStart, streamRow, streamBoundary } from "./d1-stream-digest";
 
 export const COPY_CHECKPOINT_SCHEMA = `CREATE TABLE cockpit_copy_checkpoint (
  slot INTEGER PRIMARY KEY CHECK(slot=1), run_id TEXT NOT NULL,
- schema_hash TEXT NOT NULL, scope_hash TEXT NOT NULL,
+ schema_hash TEXT NOT NULL, scope_hash TEXT NOT NULL, copy_hash TEXT NOT NULL,
  revision INTEGER NOT NULL CHECK(revision>=0), table_index INTEGER NOT NULL,
  cursor_json TEXT, table_rows INTEGER NOT NULL CHECK(table_rows>=0),
  total_rows INTEGER NOT NULL CHECK(total_rows>=0), total_bytes INTEGER NOT NULL CHECK(total_bytes>=0),
@@ -28,7 +29,7 @@ export type CopyScope = {
 const quote = (name: string) => '"' + name.replaceAll('"', '""') + '"';
 const encode = new TextEncoder();
 const TOTAL_ROWS = 2000, TOTAL_BYTES = 16 * 1024 * 1024;
-const legacyTables = ["cockpit_cutover_receipt", "cockpit_migration_run", "cockpit_migration_row"];
+const legacyTables = ["cockpit_cutover_receipt", "cockpit_migration_run", "cockpit_migration_row", "cockpit_copy_verification"];
 const safeCodes = new Set([
   "COPY_SCOPE_REQUIRED", "COPY_INVALID_RUN", "COPY_CONTEXT_MISMATCH", "COPY_CHECKPOINT_INVALID",
   "COPY_NOT_STARTED", "COPY_STALE_REVISION", "COPY_SCHEMA_MISMATCH", "COPY_CAPACITY_EXCEEDED",
@@ -52,24 +53,26 @@ async function context(runId: string, scope: CopyScope) {
     throw Error("COPY_SCOPE_REQUIRED");
   const owners = [...new Set(scope.ownerEmails.map(e => e.trim().toLowerCase()))].sort();
   const sourceIdentity = scope.sourceIdentitySha256;
-  return { owners, schemaHash: await digest(["cockpit-internal-copy-progress-v1", definitions]),
+  return { owners, schemaHash: await digest([STREAM_FORMAT, definitions]),
     scopeHash: await digest([sourceIdentity, owners]) };
 }
 type CopyContext = Awaited<ReturnType<typeof context>>;
 type Checkpoint = {
+  copy_hash: string;
   revision: number; table_index: number; cursor_json: string | null;
   table_rows: number; total_rows: number; total_bytes: number; phase: "copying" | "copied";
 };
 function natural(n: unknown) { return typeof n === "number" && Number.isSafeInteger(n) && n >= 0; }
 async function load(db: D1DatabaseSession, runId: string, ctx: CopyContext): Promise<Checkpoint> {
-  const r = await db.prepare("SELECT run_id,schema_hash,scope_hash,revision,table_index,cursor_json,table_rows,total_rows,total_bytes,phase FROM cockpit_copy_checkpoint WHERE slot=1").first<Record<string, unknown>>();
+  const r = await db.prepare("SELECT run_id,schema_hash,scope_hash,copy_hash,revision,table_index,cursor_json,table_rows,total_rows,total_bytes,phase FROM cockpit_copy_checkpoint WHERE slot=1").first<Record<string, unknown>>();
   if (!r) throw Error("COPY_NOT_STARTED");
   if (r.run_id !== runId || r.schema_hash !== ctx.schemaHash || r.scope_hash !== ctx.scopeHash)
     throw Error("COPY_CONTEXT_MISMATCH");
   if (![r.revision, r.table_index, r.table_rows, r.total_rows, r.total_bytes].every(natural))
     throw Error("COPY_CHECKPOINT_INVALID");
   const cp = r as unknown as Checkpoint;
-  if (cp.table_index > definitions.length || cp.total_rows > TOTAL_ROWS || cp.total_bytes > TOTAL_BYTES ||
+  if (typeof cp.copy_hash !== "string" || !/^[0-9a-f]{64}$/.test(cp.copy_hash) ||
+      cp.table_index > definitions.length || cp.total_rows > TOTAL_ROWS || cp.total_bytes > TOTAL_BYTES ||
       cp.table_rows > cp.total_rows || cp.revision !== cp.total_rows + cp.table_index ||
       cp.phase !== (cp.table_index === definitions.length ? "copied" : "copying") ||
       (cp.cursor_json === null ? cp.table_rows !== 0 : cp.table_rows === 0) ||
@@ -90,7 +93,7 @@ function summary(cp: Checkpoint) {
   return { revision: cp.revision, tableIndex: cp.table_index, rowsCopied: cp.total_rows,
     jsonBytesCopied: cp.total_bytes, phase: cp.phase, verified: false as const, cutoverAllowed: false as const };
 }
-async function checkLayout(db: D1DatabaseSession, indices: number[]) {
+export async function checkCopyLayout(db: D1DatabaseSession, indices: number[]) {
   // The rollback assertion is a security invariant, not just a table name.
   const controls = await db.prepare("SELECT name,sql FROM sqlite_schema WHERE type='table' AND name IN ('cockpit_copy_checkpoint','cockpit_atomic_assertion')").all<{ name: string; sql: string }>();
   const canonical = (sql: string) => sql.replace(/\s+/g, "").replace(/ifnotexists/ig, "").toLowerCase();
@@ -98,7 +101,7 @@ async function checkLayout(db: D1DatabaseSession, indices: number[]) {
   if (controls.results.length !== 2 || controls.results.some(r => canonical(r.sql) !==
       canonical(r.name === "cockpit_copy_checkpoint" ? COPY_CHECKPOINT_SCHEMA : assertion)))
     throw Error("COPY_SCHEMA_MISMATCH");
-  const rows = await db.batch<{ name: string; pk: number }>(indices.map(i => db.prepare(`PRAGMA table_info(${quote(definitions[i].name)})`)));
+  const rows = indices.length ? await db.batch<{ name: string; pk: number }>(indices.map(i => db.prepare(`PRAGMA table_info(${quote(definitions[i].name)})`))) : [];
   for (let n = 0; n < indices.length; n++) {
     const def = definitions[indices[n]], info = rows[n].results;
     if (info.length !== def.columns.length || !def.columns.every(c => info.some(r => r.name === c)) ||
@@ -116,13 +119,13 @@ async function checkLayout(db: D1DatabaseSession, indices: number[]) {
 export async function initializeBoundedCopy(target: D1Database, runId: string, scope: CopyScope) {
   try {
     const ctx = await context(runId, scope), db = target.withSession("first-primary");
-    await checkLayout(db, definitions.map((_, i) => i));
-    const legacy = await db.prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name IN (?,?,?)").bind(...legacyTables).all<{ name: string }>();
+    await checkCopyLayout(db, definitions.map((_, i) => i));
+    const legacy = await db.prepare(`SELECT name FROM sqlite_schema WHERE type='table' AND name IN (${legacyTables.map(() => "?").join(",")})`).bind(...legacyTables).all<{ name: string }>();
     const emptiness = [...definitions.map(d => d.name), ...legacy.results.map(r => r.name), "cockpit_copy_checkpoint", "cockpit_atomic_assertion"]
       .map(name => `NOT EXISTS(SELECT 1 FROM ${quote(name)})`).join(" AND ");
     try {
-      await atomicCheckedBatch(db, [{ statement: db.prepare(`INSERT INTO cockpit_copy_checkpoint(slot,run_id,schema_hash,scope_hash,revision,table_index,cursor_json,table_rows,total_rows,total_bytes,phase) SELECT 1,?,?,?,0,0,NULL,0,0,0,'copying' WHERE ${emptiness}`)
-        .bind(runId, ctx.schemaHash, ctx.scopeHash), expectedChanges: 1 }]);
+      await atomicCheckedBatch(db, [{ statement: db.prepare(`INSERT INTO cockpit_copy_checkpoint(slot,run_id,schema_hash,scope_hash,copy_hash,revision,table_index,cursor_json,table_rows,total_rows,total_bytes,phase) SELECT 1,?,?,?,?,0,0,NULL,0,0,0,'copying' WHERE ${emptiness}`)
+        .bind(runId, ctx.schemaHash, ctx.scopeHash, await streamStart(runId, ctx.schemaHash, ctx.scopeHash)), expectedChanges: 1 }]);
     } catch { throw Error("COPY_INITIALIZE_UNCONFIRMED"); }
     return summary(await load(db, runId, ctx));
   } catch (error) { throw safeError(error); }
@@ -132,6 +135,19 @@ export async function initializeBoundedCopy(target: D1Database, runId: string, s
 export async function getBoundedCopyStatus(target: D1Database, runId: string, scope: CopyScope) {
   try { return summary(await load(target.withSession("first-primary"), runId, await context(runId, scope))); }
   catch (error) { throw safeError(error); }
+}
+
+/** Private binding for independent verification; never an activation manifest. */
+export async function getCopyVerificationBinding(target: D1Database, runId: string, scope: CopyScope) {
+  try {
+    const ctx = await context(runId, scope), db = target.withSession("first-primary");
+    await checkCopyLayout(db, []);
+    const cp = await load(db, runId, ctx);
+    if (cp.phase !== "copied") throw Error("COPY_NOT_STARTED");
+    return { runId, schemaHash: ctx.schemaHash, scopeHash: ctx.scopeHash,
+      copyHash: cp.copy_hash, startHash: await streamStart(runId, ctx.schemaHash, ctx.scopeHash),
+      revision: cp.revision, totalRows: cp.total_rows, totalBytes: cp.total_bytes, format: STREAM_FORMAT };
+  } catch (error) { throw safeError(error); }
 }
 
 /** Exactly one row or table boundary per call. No auto-retry, background loop,
@@ -146,12 +162,13 @@ export async function copyBoundedStep(source: Pick<Client, "transaction">, targe
     const cp = await load(db, runId, ctx);
     if (cp.revision !== expectedRevision) throw Error("COPY_STALE_REVISION");
     if (cp.phase === "copied") return summary(cp);
-    await checkLayout(db, [cp.table_index]);
+    await checkCopyLayout(db, [cp.table_index]);
     const def = definitions[cp.table_index];
     const row = await readBoundedMigrationRow(source, def.name, cp.cursor_json === null ? null : JSON.parse(cp.cursor_json));
     const next: Checkpoint = { ...cp, revision: cp.revision + 1 };
     if (row.done) {
       if (cp.table_index === 0 && cp.table_rows === 0) throw Error("COPY_OWNER_MISMATCH");
+      next.copy_hash = await streamBoundary(cp.copy_hash, cp.table_index, cp.table_rows, cp.total_rows, cp.total_bytes);
       next.table_index++; next.cursor_json = null; next.table_rows = 0;
       if (next.table_index === definitions.length) next.phase = "copied";
     } else {
@@ -162,10 +179,11 @@ export async function copyBoundedStep(source: Pick<Client, "transaction">, targe
           (def.name === "record" && next.table_rows > 1000) || (def.name === "session" && next.table_rows > 100))
         throw Error("COPY_CAPACITY_EXCEEDED");
       next.cursor_json = JSON.stringify(row.cursor);
+      next.copy_hash = await streamRow(cp.copy_hash, cp.table_index, row.values);
     }
-    const update = db.prepare(`UPDATE cockpit_copy_checkpoint SET revision=?,table_index=?,cursor_json=?,table_rows=?,total_rows=?,total_bytes=?,phase=? WHERE slot=1 AND run_id=? AND schema_hash=? AND scope_hash=? AND revision=? AND table_index=? AND cursor_json IS ? AND table_rows=? AND total_rows=? AND total_bytes=? AND phase='copying'`)
-      .bind(next.revision, next.table_index, next.cursor_json, next.table_rows, next.total_rows, next.total_bytes, next.phase,
-        runId, ctx.schemaHash, ctx.scopeHash, cp.revision, cp.table_index, cp.cursor_json, cp.table_rows, cp.total_rows, cp.total_bytes);
+    const update = db.prepare(`UPDATE cockpit_copy_checkpoint SET revision=?,table_index=?,cursor_json=?,table_rows=?,total_rows=?,total_bytes=?,phase=?,copy_hash=? WHERE slot=1 AND run_id=? AND schema_hash=? AND scope_hash=? AND revision=? AND table_index=? AND cursor_json IS ? AND table_rows=? AND total_rows=? AND total_bytes=? AND phase='copying' AND copy_hash=?`)
+      .bind(next.revision, next.table_index, next.cursor_json, next.table_rows, next.total_rows, next.total_bytes, next.phase, next.copy_hash,
+        runId, ctx.schemaHash, ctx.scopeHash, cp.revision, cp.table_index, cp.cursor_json, cp.table_rows, cp.total_rows, cp.total_bytes, cp.copy_hash);
     const mutations = [{ statement: update, expectedChanges: 1 }];
     if (!row.done) mutations.push({ statement: db.prepare(`INSERT INTO ${quote(def.name)} (${def.columns.map(quote).join(",")}) VALUES (${def.columns.map(() => "?").join(",")})`).bind(...row.values), expectedChanges: 1 });
     try { await atomicCheckedBatch(db, mutations); }

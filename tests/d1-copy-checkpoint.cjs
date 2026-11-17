@@ -5,8 +5,8 @@ const { build } = dep('esbuild'), { Miniflare, convertV4MiniflareOptions } = dep
 const { createClient } = require('@libsql/client');
 module.exports = async function runCopyCheckpointTests() {
   const output = 'packages/web/tests/.d1-copy-checkpoint-test.mjs';
-  await build({ stdin: { contents: `export * from './security-ops/d1-copy-checkpoint.ts'; export {migrationDefinitions} from './packages/web/src/api/database/d1/migration-schema.ts'`, resolveDir: process.cwd(), loader: 'ts' }, bundle: true, platform: 'node', format: 'esm', packages: 'external', outfile: output });
-  const { initializeBoundedCopy: start, getBoundedCopyStatus: status, copyBoundedStep: step, COPY_CHECKPOINT_SCHEMA, migrationDefinitions: defs } = await import(require('node:url').pathToFileURL(path.resolve(output)));
+  await build({ stdin: { contents: `export * from './security-ops/d1-copy-checkpoint.ts'; export {migrationDefinitions} from './packages/web/src/api/database/d1/migration-schema.ts'; export {auditHash} from './packages/web/src/api/security/audit.ts'`, resolveDir: process.cwd(), loader: 'ts' }, bundle: true, platform: 'node', format: 'esm', packages: 'external', outfile: output });
+  const { initializeBoundedCopy: start, getBoundedCopyStatus: status, copyBoundedStep: step, COPY_CHECKPOINT_SCHEMA, migrationDefinitions: defs, auditHash } = await import(require('node:url').pathToFileURL(path.resolve(output)));
   const temporary = fs.mkdtempSync('/tmp/cockpit-copy-checkpoint-');
   const source = createClient({ url: 'file:' + temporary + '/source.sqlite' });
   const opts = { modules: true, script: 'export default {fetch(){return new Response("synthetic")}}', compatibilityDate: '2026-10-17', d1Databases: ['RUN', 'RACE', 'UNKNOWN', 'ROLLBACK', 'GUARD'], resourcePersistencePath: temporary + '/d1' };
@@ -48,6 +48,12 @@ module.exports = async function runCopyCheckpointTests() {
       });
       await source.execute({ sql: `INSERT INTO ${quote(def.name)} (${def.columns.map(quote).join(',')}) VALUES (${values.map(() => '?').join(',')})`, args: values });
     }
+    const audit = { hashVersion: 2, userId: 'owner', seq: 1, action: 'synthetic-audit_event-action', atMs: 1, deviceId: null, payloadCiphertext: null, payloadIv: null, prevHash: 'GENESIS' };
+    const auditDigest = await auditHash(audit);
+    await source.execute({ sql: "UPDATE audit_event SET seq=1,hash_version=2,prev_hash='GENESIS',hash=?", args: [auditDigest] });
+    const secondAudit = await auditHash({ ...audit, seq: 2, atMs: 2, action: 'synthetic-second', prevHash: auditDigest });
+    await source.execute({ sql: "INSERT INTO audit_event(id,user_id,seq,action,at_ms,hash_version,prev_hash,hash) VALUES ('z-audit','owner',2,'synthetic-second',2,2,?,?)", args: [auditDigest, secondAudit] });
+    await source.execute({ sql: 'UPDATE audit_head SET seq=2,hash=?', args: [secondAudit] });
     await source.execute("INSERT INTO record(id,user_id,type,ciphertext,iv,updated_at_ms) VALUES ('z-last','owner','case','small','iv',0)");
     const ddl = (schema + fs.readFileSync('cloudflare/d1/schema.sql', 'utf8')).replace(/--[^\n]*/g, '').split(';').map(s => s.trim()).filter(Boolean);
     const dbs = {};
@@ -71,7 +77,7 @@ module.exports = async function runCopyCheckpointTests() {
     for (const name of opts.d1Databases) dbs[name] = await mf.getD1Database(name);
     assert.deepEqual(await status(dbs.RUN, runId, scope), persisted);
     while (cp.phase !== 'copied') cp = await step(readonlySource, dbs.RUN, runId, cp.revision, scope);
-    assert.equal(cp.rowsCopied, 19); assert.equal(cp.revision, 37); assert.equal(cp.verified, false); assert.equal(cp.cutoverAllowed, false);
+    assert.equal(cp.rowsCopied, 20); assert.equal(cp.revision, 38); assert.equal(cp.verified, false); assert.equal(cp.cutoverAllowed, false);
     assert.deepEqual(await step({ transaction: () => { throw Error('must not read'); } }, dbs.RUN, runId, cp.revision, scope), cp);
     for (const def of defs) {
       // Compare exact bytes independently, including embedded NUL and Unicode.
@@ -83,6 +89,7 @@ module.exports = async function runCopyCheckpointTests() {
     assert.equal((await dbs.RUN.prepare("SELECT count(*) n FROM sqlite_schema WHERE name='cockpit_cutover_receipt'").first()).n, 0);
     assert.equal((await dbs.RUN.prepare('SELECT count(*) n FROM cockpit_atomic_assertion').first()).n, 0);
     assert.ok(!JSON.stringify(cp).includes('owner@example.invalid'));
+    await require('./d1-copy-verification.cjs')({ source, template: dbs.RUN, defs, scope, runId });
 
     // Two invocations reading the same checkpoint: one atomic winner only.
     await start(dbs.RACE, runId, scope);

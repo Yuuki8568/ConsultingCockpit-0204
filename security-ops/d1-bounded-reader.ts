@@ -5,6 +5,7 @@
  * schema/owner/audit checks and independent digest passes remain necessary.
  */
 import type { Client } from "@libsql/client";
+import type { D1Database } from "@cloudflare/workers-types";
 import { migrationDefinitions } from "../packages/web/src/api/database/d1/migration-schema";
 
 const quote = (name: string) => '"' + name.replaceAll('"', '""') + '"';
@@ -15,6 +16,12 @@ type Cell = string | number | null;
 export type BoundedRow =
   | { done: true }
   | { done: false; columns: string[]; values: Cell[]; cursor: string[]; jsonBytes: number };
+type ReadTransaction = {
+  execute(statement: { sql: string; args: (string | number)[] }): Promise<{ rows: Record<string, unknown>[] }>;
+  commit(): Promise<unknown>;
+  rollback(): Promise<unknown>;
+  close(): void;
+};
 
 function normalize(value: unknown): Cell {
   if (value === null || typeof value === "string") return value;
@@ -45,6 +52,28 @@ export async function readBoundedMigrationRow(
   after: readonly string[] | null,
   maxJsonBytes = BOUNDED_ROW_JSON_BYTES,
 ): Promise<BoundedRow> {
+  return readBoundedRow(source, table, after, maxJsonBytes);
+}
+
+/** Independent D1 storage read, bounded before materializing values. Sessions
+ * provide sequential consistency, NOT a multi-query snapshot or a write freeze.
+ */
+export async function readBoundedTargetRow(target: D1Database, table: string,
+  after: readonly string[] | null, maxJsonBytes = BOUNDED_ROW_JSON_BYTES): Promise<BoundedRow> {
+  return readBoundedRow({ async transaction() {
+    const session = target.withSession("first-primary");
+    return {
+      async execute(statement) {
+        const result = await session.prepare(statement.sql).bind(...statement.args).all<Record<string, unknown>>();
+        return { rows: result.results };
+      },
+      async commit() {}, async rollback() {}, close() {},
+    };
+  } }, table, after, maxJsonBytes);
+}
+
+async function readBoundedRow(source: { transaction(mode: "read"): Promise<ReadTransaction> },
+  table: string, after: readonly string[] | null, maxJsonBytes: number): Promise<BoundedRow> {
   const def = migrationDefinitions.find((d) => d.name === table);
   if (!def) throw Error("BOUNDED_UNKNOWN_TABLE");
   if (!Number.isSafeInteger(maxJsonBytes) || maxJsonBytes < def.columns.length * 6 + 2 ||
