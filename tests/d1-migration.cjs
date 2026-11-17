@@ -86,6 +86,7 @@ const {createClient}=require('@libsql/client');
  await exec('ALTER TABLE record ADD COLUMN unexpected TEXT');
  await assert.rejects(copyToEmptyD1(source,databases.GOOD,options),/SOURCE_SCHEMA_MISMATCH/);
  await require('./d1-free-preflight.cjs')();
+ await require('./d1-schema-guard.cjs')();
  await require('./d1-bounded-reader.cjs')();
  await require('./d1-copy-checkpoint.cjs')();
  console.log('PASS D1 migration: all-table schema and readback hashes, owner/maintenance gates, ciphertext and auth metadata preservation, nonempty/racing target refusal, atomic rollback, post-copy tamper detection, unchanged source');

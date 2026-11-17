@@ -7,6 +7,7 @@
 import type { Client } from "@libsql/client";
 import type { D1Database } from "@cloudflare/workers-types";
 import { migrationDefinitions } from "../packages/web/src/api/database/d1/migration-schema";
+import { assertBusinessSchema, assertBusinessForeignKeys } from "./d1-schema-guard";
 
 const quote = (name: string) => '"' + name.replaceAll('"', '""') + '"';
 const encoder = new TextEncoder();
@@ -88,18 +89,20 @@ async function readBoundedRow(source: { transaction(mode: "read"): Promise<ReadT
   const cursor = after === null ? null : [...after];
   const tx = await source.transaction("read").catch(() => { throw Error("BOUNDED_QUERY_FAILED"); });
   try {
-    const info = await tx.execute({ sql: "SELECT name,type,pk,\"notnull\",hidden FROM pragma_table_xinfo(?) LIMIT ?", args: [def.name, def.columns.length + 1] });
+    const query = async (sql: string, args: (string | number)[]) => (await tx.execute({ sql, args })).rows;
+    await assertBusinessSchema(query, def.name);
+    const info = await tx.execute({ sql: "SELECT name,type,pk,\"notnull\",hidden FROM pragma_table_xinfo(?, 'main') LIMIT ?", args: [def.name, def.columns.length + 1] });
     const keys = info.rows.filter((r) => Number(r.pk) > 0).sort((a, b) => Number(a.pk) - Number(b.pk));
     if (info.rows.length !== def.columns.length ||
         !def.columns.every((c) => info.rows.some((r) => r.name === c && Number(r.hidden) === 0)) ||
         JSON.stringify(keys.map((r) => r.name)) !== JSON.stringify(def.keys) ||
         keys.some((r) => String(r.type).toUpperCase() !== "TEXT" || Number(r.notnull) !== 1))
       throw Error("BOUNDED_SCHEMA_MISMATCH");
-    const indices = await tx.execute({ sql: "SELECT name,\"unique\",partial FROM pragma_index_list(?) WHERE origin='pk' LIMIT 2", args: [def.name] });
+    const indices = await tx.execute({ sql: "SELECT name,\"unique\",partial FROM pragma_index_list(?, 'main') WHERE origin='pk' LIMIT 2", args: [def.name] });
     if (indices.rows.length !== 1 || typeof indices.rows[0].name !== "string" ||
         Number(indices.rows[0].unique) !== 1 || Number(indices.rows[0].partial) !== 0)
       throw Error("BOUNDED_SCHEMA_MISMATCH");
-    const index = await tx.execute({ sql: "SELECT name,coll,desc FROM pragma_index_xinfo(?) WHERE key=1 ORDER BY seqno LIMIT ?", args: [indices.rows[0].name, def.keys.length + 1] });
+    const index = await tx.execute({ sql: "SELECT name,coll,desc FROM pragma_index_xinfo(?, 'main') WHERE key=1 ORDER BY seqno LIMIT ?", args: [indices.rows[0].name, def.keys.length + 1] });
     if (index.rows.length !== def.keys.length || index.rows.some((r, i) =>
       r.name !== def.keys[i] || r.coll !== "BINARY" || Number(r.desc) !== 0))
       throw Error("BOUNDED_SCHEMA_MISMATCH");
@@ -118,7 +121,7 @@ async function readBoundedRow(source: { transaction(mode: "read"): Promise<ReadT
     const order = def.keys.map((c) => `_source.${quote(c)} COLLATE BINARY`).join(",");
     const where = cursor === null ? "" : ` WHERE (${keySql})>(${def.keys.map(() => "? COLLATE BINARY").join(",")})`;
     const statement = {
-      sql: `SELECT (${bytes}) AS _bytes,(${unsupported}) AS _unsupported,(${validKeys}) AS _valid_keys,${def.columns.map((c, i) => `typeof(${quote(c)}) AS _type_${i},CASE WHEN ${guard} THEN CASE WHEN typeof(${quote(c)})='text' THEN hex(CAST(${quote(c)} AS BLOB)) ELSE ${quote(c)} END ELSE NULL END AS ${quote(c)}`).join(",")} FROM ${quote(def.name)} AS _source${where} ORDER BY ${order} LIMIT 1`,
+      sql: `SELECT (${bytes}) AS _bytes,(${unsupported}) AS _unsupported,(${validKeys}) AS _valid_keys,${def.columns.map((c, i) => `typeof(${quote(c)}) AS _type_${i},CASE WHEN ${guard} THEN CASE WHEN typeof(${quote(c)})='text' THEN hex(CAST(${quote(c)} AS BLOB)) ELSE ${quote(c)} END ELSE NULL END AS ${quote(c)}`).join(",")} FROM main.${quote(def.name)} AS _source${where} ORDER BY ${order} LIMIT 1`,
       args: cursor ?? [],
     };
     const result = await tx.execute(statement);
@@ -137,11 +140,14 @@ async function readBoundedRow(source: { transaction(mode: "read"): Promise<ReadT
       if (jsonBytes > maxJsonBytes) throw Error("BOUNDED_ROW_TOO_LARGE");
       answer = { done: false, columns: [...def.columns], values, cursor: nextCursor as string[], jsonBytes };
     }
+    if (answer.done) await assertBusinessForeignKeys(query, def.name);
     await tx.commit();
     return answer;
   } catch (error) {
     try { await tx.rollback(); } catch { /* Never expose SQL/credentials/row contents. */ }
     const safe = new Set(["BOUNDED_SCHEMA_MISMATCH", "BOUNDED_UNSUPPORTED_VALUE", "BOUNDED_ROW_TOO_LARGE"]);
+    if (error instanceof Error && error.message === "SCHEMA_DEFINITION_MISMATCH") throw Error("BOUNDED_SCHEMA_MISMATCH");
+    if (error instanceof Error && error.message === "SCHEMA_FOREIGN_KEY_MISMATCH") throw Error("BOUNDED_FOREIGN_KEY_MISMATCH");
     throw Error(error instanceof Error && safe.has(error.message) ? error.message : "BOUNDED_QUERY_FAILED");
   } finally {
     try { tx.close(); } catch { throw Error("BOUNDED_QUERY_FAILED"); }

@@ -9,6 +9,8 @@ import { migrationDefinitions as definitions } from "../packages/web/src/api/dat
 import { atomicCheckedBatch } from "../cloudflare/d1/atomic-batch";
 import { readBoundedMigrationRow } from "./d1-bounded-reader";
 import { STREAM_FORMAT, streamStart, streamRow, streamBoundary } from "./d1-stream-digest";
+import { assertBusinessSchema } from "./d1-schema-guard";
+import { BUSINESS_SCHEMA_CONTRACT } from "./d1-schema-contract";
 
 export const COPY_CHECKPOINT_SCHEMA = `CREATE TABLE cockpit_copy_checkpoint (
  slot INTEGER PRIMARY KEY CHECK(slot=1), run_id TEXT NOT NULL,
@@ -36,6 +38,7 @@ const safeCodes = new Set([
   "COPY_OWNER_MISMATCH", "COPY_INITIALIZE_UNCONFIRMED", "COPY_COMMIT_UNCONFIRMED",
   "BOUNDED_SCHEMA_MISMATCH", "BOUNDED_UNSUPPORTED_VALUE", "BOUNDED_ROW_TOO_LARGE",
   "BOUNDED_QUERY_FAILED", "BOUNDED_INVALID_CURSOR", "BOUNDED_INVALID_LIMIT", "BOUNDED_UNKNOWN_TABLE",
+  "BOUNDED_FOREIGN_KEY_MISMATCH",
 ]);
 function safeError(error: unknown) {
   return Error(error instanceof Error && safeCodes.has(error.message) ? error.message : "COPY_QUERY_FAILED");
@@ -53,7 +56,7 @@ async function context(runId: string, scope: CopyScope) {
     throw Error("COPY_SCOPE_REQUIRED");
   const owners = [...new Set(scope.ownerEmails.map(e => e.trim().toLowerCase()))].sort();
   const sourceIdentity = scope.sourceIdentitySha256;
-  return { owners, schemaHash: await digest([STREAM_FORMAT, definitions]),
+  return { owners, schemaHash: await digest([STREAM_FORMAT, definitions, BUSINESS_SCHEMA_CONTRACT]),
     scopeHash: await digest([sourceIdentity, owners]) };
 }
 type CopyContext = Awaited<ReturnType<typeof context>>;
@@ -107,6 +110,10 @@ export async function checkCopyLayout(db: D1DatabaseSession, indices: number[]) 
     if (info.length !== def.columns.length || !def.columns.every(c => info.some(r => r.name === c)) ||
         JSON.stringify(info.filter(r => r.pk > 0).sort((a, b) => a.pk - b.pk).map(r => r.name)) !== JSON.stringify(def.keys))
       throw Error("COPY_SCHEMA_MISMATCH");
+    try { await assertBusinessSchema(async (sql, args) => (await db.prepare(sql).bind(...args).all<Record<string, unknown>>()).results, def.name); }
+    catch (error) {
+      throw Error(error instanceof Error && error.message === "SCHEMA_DEFINITION_MISMATCH" ? "COPY_SCHEMA_MISMATCH" : "COPY_QUERY_FAILED");
+    }
   }
   if (await db.prepare("SELECT 1 FROM sqlite_schema WHERE type='trigger' LIMIT 1").first())
     throw Error("COPY_SCHEMA_MISMATCH");

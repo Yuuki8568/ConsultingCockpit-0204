@@ -4,13 +4,13 @@ const dep = require('node:module').createRequire(require.resolve('wrangler'));
 const { build } = dep('esbuild'), { Miniflare, convertV4MiniflareOptions } = dep('miniflare');
 module.exports = async function verifyCopies({ source, template, defs, scope, runId }) {
   const output = 'packages/web/tests/.d1-copy-verification-test.mjs';
-  await build({ stdin: { contents: `export * from './security-ops/d1-copy-verification.ts'; export * from './security-ops/d1-copy-checkpoint.ts'`, resolveDir: process.cwd(), loader: 'ts' }, bundle: true, platform: 'node', format: 'esm', packages: 'external', outfile: output });
-  const { initializeCopyVerification: start, getCopyVerificationStatus: status, verifyCopyStep: rawStep, COPY_VERIFICATION_SCHEMA, COPY_CHECKPOINT_SCHEMA } = await import(require('node:url').pathToFileURL(path.resolve(output)));
+  await build({ stdin: { contents: `export * from './security-ops/d1-copy-verification.ts'; export * from './security-ops/d1-copy-checkpoint.ts'; export {BUSINESS_SCHEMA_CONTRACT} from './security-ops/d1-schema-contract.ts'`, resolveDir: process.cwd(), loader: 'ts' }, bundle: true, platform: 'node', format: 'esm', packages: 'external', outfile: output });
+  const { initializeCopyVerification: start, getCopyVerificationStatus: status, verifyCopyStep: rawStep, COPY_VERIFICATION_SCHEMA, COPY_CHECKPOINT_SCHEMA, BUSINESS_SCHEMA_CONTRACT } = await import(require('node:url').pathToFileURL(path.resolve(output)));
   const witnessHash = (await template.prepare('SELECT hash FROM audit_head').first()).hash;
   const witness = { async fetch(request) { assert.equal(request.method, 'GET'); assert.equal(request.url, 'https://witness/head?user=owner'); return Response.json({ seq: 2, hash: witnessHash }); } };
   const step = (input, target, id, revision, options, service = witness) => rawStep(input, target, id, revision, options, service);
   const tmp = fs.mkdtempSync('/tmp/cockpit-verify-copy-');
-  const names = ['GOOD', 'TARGET', 'SOURCE', 'RACE', 'LOSS', 'ROLLBACK', 'BLOB', 'AUDIT', 'ANCHOR', 'CHANGED', 'UNAVAILABLE', 'HEAD', 'PREVIOUS'];
+  const names = ['GOOD', 'TARGET', 'SOURCE', 'RACE', 'LOSS', 'ROLLBACK', 'BLOB', 'AUDIT', 'ANCHOR', 'CHANGED', 'UNAVAILABLE', 'HEAD', 'PREVIOUS', 'SCHEMA', 'FOREIGN_KEY'];
   const opts = { modules: true, script: 'export default {fetch(){return new Response("synthetic")}}', compatibilityDate: '2026-10-17', d1Databases: names, resourcePersistencePath: tmp + '/d1' };
   let mf = new Miniflare(convertV4MiniflareOptions(opts));
   const quote = c => '"' + c.replaceAll('"', '""') + '"', databases = {};
@@ -33,7 +33,7 @@ module.exports = async function verifyCopies({ source, template, defs, scope, ru
   try {
     const baseline = await template.prepare('SELECT * FROM cockpit_copy_checkpoint').first();
     const copied = [];
-    let digest = hash(['cockpit-d1-stream-v2', 'start', runId, hash(['cockpit-d1-stream-v2', defs]), hash([scope.sourceIdentitySha256, scope.ownerEmails])]);
+    let digest = hash(['cockpit-d1-stream-v2', 'start', runId, hash(['cockpit-d1-stream-v2', defs, BUSINESS_SCHEMA_CONTRACT]), hash([scope.sourceIdentitySha256, scope.ownerEmails])]);
     let rows = 0, bytes = 0;
     for (let i = 0; i < defs.length; i++) {
       const def = defs[i], entries = (await template.prepare(`SELECT * FROM ${quote(def.name)} ORDER BY ${def.keys.map(c => quote(c) + ' COLLATE BINARY').join(',')}`).all()).results;
@@ -81,6 +81,21 @@ module.exports = async function verifyCopies({ source, template, defs, scope, ru
     try { await assert.rejects(advance(databases.SOURCE, 'matched'), /^Error: VERIFY_CONTENT_MISMATCH$/); }
     finally { await source.execute("UPDATE record SET iv='iv' WHERE id='z-last'"); }
     assert.equal((await status(databases.SOURCE, runId, scope)).phase, 'failed');
+
+    await start(databases.SCHEMA, runId, scope);
+    await databases.SCHEMA.prepare('DROP INDEX user_email_unique').run();
+    await assert.rejects(step(readonly, databases.SCHEMA, runId, 0, scope), /^Error: BOUNDED_SCHEMA_MISMATCH$/);
+    assert.equal((await status(databases.SCHEMA, runId, scope)).phase, 'failed');
+    await start(databases.FOREIGN_KEY, runId, scope);
+    await advance(databases.FOREIGN_KEY, 'source');
+    const foreignKeys = (await source.execute('PRAGMA foreign_keys')).rows[0].foreign_keys;
+    await source.execute('PRAGMA foreign_keys=OFF'); // Synthetic corruption fixture only.
+    await source.execute("UPDATE account SET user_id='synthetic-orphan'");
+    try { await assert.rejects(advance(databases.FOREIGN_KEY, 'matched'), /^Error: BOUNDED_FOREIGN_KEY_MISMATCH$/); }
+    finally { await source.execute("UPDATE account SET user_id='owner'"); await source.execute(`PRAGMA foreign_keys=${foreignKeys ? 'ON' : 'OFF'}`); }
+    p = await status(databases.FOREIGN_KEY, runId, scope);
+    assert.equal(p.phase, 'failed'); assert.equal(p.failureCode, 'BOUNDED_FOREIGN_KEY_MISMATCH');
+    await assert.rejects(step(readonly, databases.FOREIGN_KEY, runId, p.revision, scope), /^Error: VERIFY_ALREADY_FAILED$/);
 
     await start(databases.RACE, runId, scope);
     const race = await Promise.allSettled([step(readonly, databases.RACE, runId, 0, scope), step(readonly, databases.RACE, runId, 0, scope)]);
