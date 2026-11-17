@@ -111,11 +111,10 @@ module.exports = async function runBoundedReaderTests() {
       await assert.rejects(read(wrapped, 'security_counter', null), /^Error: BOUNDED_SCHEMA_MISMATCH$/);
       await source.execute('DROP TABLE security_counter');
     }
-    // A column's default collation must not override the validated PK order.
+    // Even an equivalent PK traversal does not approve an unreviewed column collation.
     await source.execute('CREATE TABLE security_counter(key TEXT COLLATE NOCASE NOT NULL,window_start INTEGER NOT NULL,count INTEGER NOT NULL,PRIMARY KEY(key COLLATE BINARY))');
     await source.execute("INSERT INTO security_counter VALUES ('A',0,1),('a',0,1),('B',0,1)");
-    assert.deepEqual((await read(wrapped, 'security_counter', ['A'])).cursor, ['B']);
-    assert.deepEqual((await read(wrapped, 'security_counter', ['B'])).cursor, ['a']);
+    await assert.rejects(read(wrapped, 'security_counter', ['A']), /^Error: BOUNDED_SCHEMA_MISMATCH$/);
     assert.ok(statements.every(s => Buffer.byteLength(s.sql) < 100000));
     await source.execute('ALTER TABLE record ADD COLUMN extra TEXT');
     await assert.rejects(read(wrapped, 'record', null), /^Error: BOUNDED_SCHEMA_MISMATCH$/);

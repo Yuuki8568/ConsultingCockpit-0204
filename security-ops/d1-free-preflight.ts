@@ -6,6 +6,7 @@
 import type { Client } from "@libsql/client";
 import type { D1Database } from "@cloudflare/workers-types";
 import { migrationDefinitions } from "../packages/web/src/api/database/d1/migration-schema";
+import { assertBusinessSchema, assertBusinessForeignKeys } from "./d1-schema-guard";
 
 const quote = (name: string) => '"' + name.replaceAll('"', '""') + '"';
 export const FREE_D1_PLANNING_LIMITS = Object.freeze({
@@ -63,26 +64,37 @@ export async function inspectFreeMigrationTable(
     throw Error("PREFLIGHT_OWNERS_REQUIRED");
   const tx = await source.transaction("read").catch(() => { throw Error("PREFLIGHT_QUERY_FAILED"); });
   try {
+    const sourceQuery = async (sql: string, args: (string | number)[]) => (await tx.execute({ sql, args })).rows;
+    const session = destination.withSession("first-primary");
+    const targetQuery = async (sql: string, args: (string | number)[]) => (await session.prepare(sql).bind(...args).all<Record<string, unknown>>()).results;
+    for (const [query, side] of [[sourceQuery, "SOURCE"], [targetQuery, "DESTINATION"]] as const) {
+      try { await assertBusinessSchema(query, def.name); await assertBusinessForeignKeys(query, def.name); }
+      catch (error) {
+        if (error instanceof Error && error.message === "SCHEMA_DEFINITION_MISMATCH") throw Error(`PREFLIGHT_${side}_SCHEMA_MISMATCH`);
+        if (error instanceof Error && error.message === "SCHEMA_FOREIGN_KEY_MISMATCH") throw Error(`PREFLIGHT_${side}_FOREIGN_KEY_MISMATCH`);
+        throw Error("PREFLIGHT_QUERY_FAILED");
+      }
+    }
     const sourceInfo = await tx.execute(`PRAGMA table_info(${quote(def.name)})`);
     if (!columnLayoutMatches(sourceInfo.rows as unknown as { name: unknown; pk: unknown }[], def))
       throw Error("PREFLIGHT_SOURCE_SCHEMA_MISMATCH");
     const bytes = def.columns.map((c) => `coalesce(length(CAST(${quote(c)} AS BLOB)),0)`).join("+");
     const unsupported = def.columns.map((c) => `typeof(${quote(c)}) NOT IN ('null','text','integer','real')`).join(" OR ");
-    const size = await tx.execute(`SELECT count(*) n,coalesce(sum(${bytes}),0) bytes,coalesce(max(${bytes}),0) largest,coalesce(sum(CASE WHEN ${unsupported} THEN 1 ELSE 0 END),0) unsupported FROM ${quote(def.name)}`);
+    const size = await tx.execute(`SELECT count(*) n,coalesce(sum(${bytes}),0) bytes,coalesce(max(${bytes}),0) largest,coalesce(sum(CASE WHEN ${unsupported} THEN 1 ELSE 0 END),0) unsupported FROM main.${quote(def.name)}`);
     const row = size.rows[0];
     const count = natural(row.n), rawBytes = natural(row.bytes), largest = natural(row.largest);
     if (natural(row.unsupported)) throw Error("PREFLIGHT_UNSUPPORTED_SOURCE_VALUE");
     if (def.name === "user") {
       const invalid = await tx.execute({
-        sql: `SELECT count(*) n FROM "user" WHERE lower(trim(email)) NOT IN (${owners.map(() => "?").join(",")}) OR email_verified IS NOT 1`,
+        sql: `SELECT count(*) n FROM main."user" WHERE lower(trim(email)) NOT IN (${owners.map(() => "?").join(",")}) OR email_verified IS NOT 1`,
         args: owners,
       });
       if (!count || natural(invalid.rows[0].n)) throw Error("PREFLIGHT_OWNER_MISMATCH");
     }
-    const [targetInfo, targetCount, targetIndexes] = await destination.batch<{ name: string; pk: number; n: number }>([
-      destination.prepare(`PRAGMA table_info(${quote(def.name)})`),
-      destination.prepare(`SELECT count(*) n FROM ${quote(def.name)}`),
-      destination.prepare(`PRAGMA index_list(${quote(def.name)})`),
+    const [targetInfo, targetCount, targetIndexes] = await session.batch<{ name: string; pk: number; n: number }>([
+      session.prepare(`PRAGMA table_info(${quote(def.name)})`),
+      session.prepare(`SELECT count(*) n FROM main.${quote(def.name)}`),
+      session.prepare(`PRAGMA index_list(${quote(def.name)})`),
     ]);
     if (!columnLayoutMatches(targetInfo.results, def)) throw Error("PREFLIGHT_DESTINATION_SCHEMA_MISMATCH");
     const result = {
@@ -103,6 +115,7 @@ export async function inspectFreeMigrationTable(
       "PREFLIGHT_INVALID_COUNT", "PREFLIGHT_SOURCE_SCHEMA_MISMATCH",
       "PREFLIGHT_UNSUPPORTED_SOURCE_VALUE", "PREFLIGHT_OWNER_MISMATCH",
       "PREFLIGHT_DESTINATION_SCHEMA_MISMATCH",
+      "PREFLIGHT_SOURCE_FOREIGN_KEY_MISMATCH", "PREFLIGHT_DESTINATION_FOREIGN_KEY_MISMATCH",
     ]);
     throw Error(safe.has(code) ? code : "PREFLIGHT_QUERY_FAILED");
   } finally {
@@ -160,7 +173,7 @@ export function planFreeD1Migration(tables: readonly TablePreflight[], usage?: F
     planningBlockers: blockers, fitsPlanningReserve: blockers.length === 0,
     // Never generate the existing activation receipt or silently select D1.
     cutoverAllowed: false as const, migrationImplemented: false as const,
-    stillRequired: ["RESUMABLE_COPY_AND_CHECKPOINTS", "FULL_SCHEMA_AND_EMPTY_CONTROL_TABLES", "SOURCE_WRITE_FREEZE", "SOURCE_AND_TARGET_DIGEST_PASSES",
+    stillRequired: ["BOUNDED_RUNNER_AND_EXECUTION_LIMITS", "DATABASE_INVENTORY_AND_CONTROL_SCHEMA", "SOURCE_WRITE_FREEZE", "SOURCE_AND_TARGET_DIGEST_PASSES",
       "AUDIT_AND_INDEPENDENT_WITNESS", "REAL_FREE_CPU_MEASUREMENT", "APPLICATION_AND_OWNER_VERIFICATION"],
   };
 }

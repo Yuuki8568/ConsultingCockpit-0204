@@ -35,7 +35,13 @@ module.exports = async function runFreePreflightTests() {
       }});
     }};
     const readOnlyTarget = new Proxy(target, { get(t, k) {
-      if (k === 'prepare') return sql => { assert.match(sql, /^(SELECT count|PRAGMA (table_info|index_list))/); targetStatements.push(sql); return t.prepare(sql); };
+      if (k === 'withSession') return option => {
+        assert.equal(option, 'first-primary'); const session = t.withSession(option);
+        return new Proxy(session, { get(s, key) {
+          if (key === 'prepare') return sql => { assert.match(sql, /^(SELECT |PRAGMA (table_info|index_list))/); targetStatements.push(sql); return s.prepare(sql); };
+          const value = s[key]; return typeof value === 'function' ? value.bind(s) : value;
+        }});
+      };
       const v = t[k]; return typeof v === 'function' ? v.bind(t) : v;
     }});
     const before = await source.execute('SELECT * FROM record');
