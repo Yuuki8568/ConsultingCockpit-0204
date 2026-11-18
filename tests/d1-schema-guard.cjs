@@ -7,8 +7,8 @@ const { createClient } = require('@libsql/client');
 
 module.exports = async function runSchemaGuardTests() {
   const output = 'packages/web/tests/.d1-schema-guard-test.mjs';
-  await build({ stdin: { contents: `export * from './security-ops/d1-schema-guard.ts'; export * from './security-ops/d1-schema-contract.ts'; export * from './security-ops/d1-free-preflight.ts'; export * from './security-ops/d1-bounded-reader.ts'; export * from './security-ops/d1-copy-checkpoint.ts'`, resolveDir: process.cwd(), loader: 'ts' }, bundle: true, platform: 'node', format: 'esm', packages: 'external', outfile: output });
-  const { assertBusinessSchema: schemaCheck, assertBusinessForeignKeys: fkCheck, BUSINESS_SCHEMA_CONTRACT: contract,
+  await build({ stdin: { contents: `export {migrationDefinitions} from './packages/web/src/api/database/d1/migration-schema.ts'; export * from './security-ops/d1-schema-guard.ts'; export * from './security-ops/d1-schema-contract.ts'; export * from './security-ops/d1-free-preflight.ts'; export * from './security-ops/d1-bounded-reader.ts'; export * from './security-ops/d1-copy-checkpoint.ts'`, resolveDir: process.cwd(), loader: 'ts' }, bundle: true, platform: 'node', format: 'esm', packages: 'external', outfile: output });
+  const { migrationDefinitions, assertBusinessSchema: schemaCheck, assertBusinessForeignKeys: fkCheck, BUSINESS_SCHEMA_CONTRACT: contract,
     inspectFreeMigrationTable: preflight, readBoundedMigrationRow: read, initializeBoundedCopy: start,
     copyBoundedStep: copy, getBoundedCopyStatus: status, COPY_CHECKPOINT_SCHEMA } = await import(require('node:url').pathToFileURL(path.resolve(output)));
   const temporary = fs.mkdtempSync('/tmp/cockpit-schema-guard-');
@@ -33,7 +33,14 @@ module.exports = async function runSchemaGuardTests() {
     // Pinning is independent of the verifier: Node crypto over actual SQLite DDL.
     // This also makes an unreviewed edit of business-schema.sql fail existing CI.
     assert.equal(contract.length, 18);
+    assert.deepEqual(migrationDefinitions.map(d => d.name).sort(), contract.map(d => d.table).sort());
     for (const item of contract) {
+      // Prove the pinned table declaration matches the exact columns and key
+      // order the copier will use, without another PRAGMA per production table.
+      const definition = migrationDefinitions.find(d => d.name === item.table);
+      const info = (await source.execute({ sql: 'SELECT name,pk FROM pragma_table_info(?) ORDER BY cid', args: [item.table] })).rows;
+      assert.deepEqual(info.map(r => r.name).sort(), [...definition.columns].sort());
+      assert.deepEqual(info.filter(r => r.pk > 0).sort((a, b) => a.pk - b.pk).map(r => r.name), definition.keys);
       const actual = (await source.execute({ sql: 'SELECT type,name,sql FROM sqlite_schema WHERE tbl_name=? ORDER BY type,name', args: [item.table] })).rows;
       assert.deepEqual(actual.map(r => ({ type: r.type, name: r.name, sqlSha256: r.sql === null ? null : hash(r.sql) })), item.objects);
       await schemaCheck(query(source), item.table); await fkCheck(query(source), item.table);

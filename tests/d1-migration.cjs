@@ -7,13 +7,13 @@ const {createClient}=require('@libsql/client');
  const output='packages/web/tests/.d1-migration-test.mjs';
  await build({stdin:{contents:`export {runMigrationOnce,RECEIPT_SCHEMA,default as maintenanceWorker} from './security-ops/d1-maintenance.ts';export {auditHash} from './packages/web/src/api/security/audit.ts';export {copyToEmptyD1} from './packages/web/src/api/database/d1/migration.ts'`,resolveDir:process.cwd(),loader:'ts'},bundle:true,platform:'node',format:'esm',packages:'external',outfile:output});
  const {auditHash,copyToEmptyD1,runMigrationOnce,RECEIPT_SCHEMA,maintenanceWorker}=await import(require('node:url').pathToFileURL(require('node:path').resolve(output)));
- const mf=new Miniflare(convertV4MiniflareOptions({modules:true,script:'export default {fetch(){return new Response("test")}}',compatibilityDate:'2026-10-17',d1Databases:['GOOD','ROLLBACK','RACE','TAMPER','WRONG','ONCE','SOURCE_CHANGED','AUDIT_FAIL','AUDIT_GOOD']}));
+ const mf=new Miniflare(convertV4MiniflareOptions({modules:true,script:'export default {fetch(){return new Response("test")}}',compatibilityDate:'2026-10-17',d1Databases:['GOOD','ROLLBACK','RACE','TAMPER','WRONG','ONCE','SOURCE_CHANGED','AUDIT_FAIL','AUDIT_GOOD','LEGACY_CONTROLLED','LEGACY_LATE']}));
  const temporary=fs.mkdtempSync('/tmp/cockpit-d1-copy-');
  const source=createClient({url:'file:'+temporary+'/source.sqlite'});
  try{
  const schema=fs.readFileSync('cloudflare/d1/business-schema.sql','utf8');await source.executeMultiple(schema);
  const ddl=(schema+fs.readFileSync('cloudflare/d1/schema.sql','utf8')).replace(/--[^\n]*/g,'').split(';').map(s=>s.trim()).filter(Boolean);
- const databases={};for(const name of ['GOOD','ROLLBACK','RACE','TAMPER','WRONG','ONCE','SOURCE_CHANGED','AUDIT_FAIL','AUDIT_GOOD']){const db=await mf.getD1Database(name);await db.batch(ddl.map(s=>db.prepare(s)));databases[name]=db;}
+ const databases={};for(const name of ['GOOD','ROLLBACK','RACE','TAMPER','WRONG','ONCE','SOURCE_CHANGED','AUDIT_FAIL','AUDIT_GOOD','LEGACY_CONTROLLED','LEGACY_LATE']){const db=await mf.getD1Database(name);await db.batch(ddl.map(s=>db.prepare(s)));databases[name]=db;}
  const exec=(sql,...args)=>source.execute({sql,args});
  const now=Date.now(),cipher=Buffer.alloc(32,1).toString('base64'),iv=Buffer.alloc(12,2).toString('base64');
  await exec('INSERT INTO user(id,name,email,email_verified,created_at,updated_at) VALUES (?,?,?,1,?,?)','owner','synthetic','owner@example.invalid',now,now);
@@ -26,6 +26,36 @@ const {createClient}=require('@libsql/client');
  await exec('INSERT INTO security_counter(key,window_start,count) VALUES (?,?,?)','unlock:owner',now,21);
  const zeroWitness={async fetch(){return Response.json({seq:0,hash:'GENESIS'})}};
  const options={maintenanceConfirmed:true,ownerEmails:['owner@example.invalid'],witness:zeroWitness};
+ // Installing the control object (even an empty, unrelated definition) disables legacy mutations.
+ const controlled = databases.LEGACY_CONTROLLED;
+ const installControl = db => db.prepare('CREATE TABLE cockpit_execution_control(id INTEGER PRIMARY KEY)').run();
+ await controlled.exec(RECEIPT_SCHEMA);
+ await installControl(controlled);
+ let sourceCalls = 0;
+ const unexpectedSource = { transaction(){ sourceCalls++; throw Error('unexpected source access'); } };
+ await assert.rejects(copyToEmptyD1(unexpectedSource, controlled, options), /^Error: CONTROLLED_DESTINATION$/);
+ assert.deepEqual(await runMigrationOnce(unexpectedSource, controlled, options.ownerEmails, zeroWitness), {started:false});
+ assert.equal(sourceCalls, 0);
+ assert.equal((await controlled.prepare('SELECT count(*) n FROM cockpit_cutover_receipt').first()).n, 0);
+ await controlled.prepare('DROP TABLE cockpit_execution_control').run();
+ const midCopyWitness = {async fetch() { await installControl(controlled); return Response.json({seq:0,hash:'GENESIS'}); }};
+ assert.deepEqual(await runMigrationOnce(source, controlled, options.ownerEmails, midCopyWitness), {started:true,verified:false});
+ assert.equal((await controlled.prepare('SELECT count(*) n FROM user').first()).n, 0);
+ assert.equal((await controlled.prepare('SELECT count(*) n FROM cockpit_atomic_assertion').first()).n, 0);
+ assert.deepEqual(await controlled.prepare('SELECT status,manifest FROM cockpit_cutover_receipt').first(), {status:'running',manifest:null});
+ // Takeover after copying but before publishing the receipt cannot mark the old run verified or failed.
+ const late = databases.LEGACY_LATE;
+ await late.exec(RECEIPT_SCHEMA);
+ const lateTarget = new Proxy(late, { get(db, key) {
+   if (key === 'prepare') return sql => {
+     const statement = db.prepare(sql);
+     if (!sql.startsWith("UPDATE cockpit_cutover_receipt SET status='verified'")) return statement;
+     return {bind(...args) { return {async run() { await installControl(db); return statement.bind(...args).run(); }}; }};
+   };
+   const value = db[key]; return typeof value === 'function' ? value.bind(db) : value;
+ }});
+ assert.deepEqual(await runMigrationOnce(source, lateTarget, options.ownerEmails, zeroWitness), {started:true,verified:false});
+ assert.deepEqual(await late.prepare('SELECT status,manifest FROM cockpit_cutover_receipt').first(), {status:'running',manifest:null});
  await assert.rejects(copyToEmptyD1(source,databases.GOOD,{...options,maintenanceConfirmed:false}),/MAINTENANCE_REQUIRED/);
  await assert.rejects(copyToEmptyD1(source,databases.GOOD,{...options,ownerEmails:['outsider@example.invalid']}),/OWNER_MISMATCH/);
  const result=await copyToEmptyD1(source,databases.GOOD,options);assert.equal(result.verified,true);assert.equal(result.cutover,false);assert.equal(result.manifest.length,18);
@@ -87,6 +117,8 @@ const {createClient}=require('@libsql/client');
  await assert.rejects(copyToEmptyD1(source,databases.GOOD,options),/SOURCE_SCHEMA_MISMATCH/);
  await require('./d1-free-preflight.cjs')();
  await require('./d1-schema-guard.cjs')();
+ await require('./d1-inventory.cjs')();
+ await require('./d1-execution-control.cjs')();
  await require('./d1-bounded-reader.cjs')();
  await require('./d1-copy-checkpoint.cjs')();
  console.log('PASS D1 migration: all-table schema and readback hashes, owner/maintenance gates, ciphertext and auth metadata preservation, nonempty/racing target refusal, atomic rollback, post-copy tamper detection, unchanged source');

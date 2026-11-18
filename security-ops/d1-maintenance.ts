@@ -5,7 +5,7 @@
 import { createClient } from "@libsql/client/web";
 import type { Client } from "@libsql/client";
 import type { D1Database } from "@cloudflare/workers-types";
-import { copyToEmptyD1 } from "../packages/web/src/api/database/d1/migration";
+import { copyToEmptyD1, LEGACY_TARGET_CONDITION } from "../packages/web/src/api/database/d1/migration";
 import type { WitnessService } from "../packages/web/src/api/database/d1/witness";
 const EXPECTED_SITE = "https://cockpit.yamashirogyomukaizen.com";
 export const RUN_ID = "cockpit-d1-cutover-v1";
@@ -15,6 +15,7 @@ export const RECEIPT_SCHEMA = `CREATE TABLE IF NOT EXISTS cockpit_cutover_receip
  */
 const errorCodes = new Set([
   "MAINTENANCE_REQUIRED",
+  "CONTROLLED_DESTINATION",
   "OWNER_MISMATCH",
   "MIGRATION_CAPACITY_EXCEEDED",
   "APPLICATION_CAPACITY_EXCEEDED",
@@ -46,7 +47,7 @@ export async function runMigrationOnce(
 ) {
   const claim = await target
     .prepare(
-      "INSERT INTO cockpit_cutover_receipt(id,status,at_ms) VALUES (?,'running',?) ON CONFLICT(id) DO NOTHING RETURNING id",
+      `INSERT INTO cockpit_cutover_receipt(id,status,at_ms) SELECT ?,'running',? WHERE ${LEGACY_TARGET_CONDITION} ON CONFLICT(id) DO NOTHING RETURNING id`,
     )
     .bind(RUN_ID, Date.now())
     .first();
@@ -59,7 +60,7 @@ export async function runMigrationOnce(
     });
     const written = await target
       .prepare(
-        "UPDATE cockpit_cutover_receipt SET status='verified',at_ms=?,manifest=? WHERE id=? AND status='running'",
+        `UPDATE cockpit_cutover_receipt SET status='verified',at_ms=?,manifest=? WHERE id=? AND status='running' AND ${LEGACY_TARGET_CONDITION}`,
       )
       .bind(
         Date.now(),
@@ -72,7 +73,7 @@ export async function runMigrationOnce(
   } catch (error) {
     await target
       .prepare(
-        "UPDATE cockpit_cutover_receipt SET status='failed',at_ms=?,manifest=? WHERE id=? AND status='running'",
+        `UPDATE cockpit_cutover_receipt SET status='failed',at_ms=?,manifest=? WHERE id=? AND status='running' AND ${LEGACY_TARGET_CONDITION}`,
       )
       .bind(
         Date.now(),

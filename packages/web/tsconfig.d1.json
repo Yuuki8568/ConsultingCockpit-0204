@@ -7,6 +7,8 @@
     "../../security-ops/d1-free-preflight.ts",
     "../../security-ops/d1-bounded-reader.ts",
     "../../security-ops/d1-copy-checkpoint.ts",
-    "../../security-ops/d1-copy-verification.ts"
+    "../../security-ops/d1-copy-verification.ts",
+    "../../security-ops/d1-execution-control.ts",
+    "../../security-ops/d1-inventory.ts"
   ]
 }

@@ -1,3 +1,4 @@
+import { STEP_RESERVE } from "./d1-execution-schema";
 /** Read-only planning tool, not a migration or activation path.
  * Call once per table, outside the production request/cron entry points.
  * Returns aggregates only; no business rows, credentials, IDs or SQL errors.
@@ -6,6 +7,7 @@
 import type { Client } from "@libsql/client";
 import type { D1Database } from "@cloudflare/workers-types";
 import { migrationDefinitions } from "../packages/web/src/api/database/d1/migration-schema";
+import { inspectCatalog, requireEmptyTables } from "./d1-inventory";
 import { assertBusinessSchema, assertBusinessForeignKeys } from "./d1-schema-guard";
 
 const quote = (name: string) => '"' + name.replaceAll('"', '""') + '"';
@@ -75,6 +77,13 @@ export async function inspectFreeMigrationTable(
         throw Error("PREFLIGHT_QUERY_FAILED");
       }
     }
+    // A complete per-table planning pass necessarily includes the user table.
+    // Inspect the entire catalog there once, in the same source read transaction.
+    if (def.name === "user") {
+      await inspectCatalog(sourceQuery, "source");
+      const catalog = await inspectCatalog(targetQuery, "destination");
+      await requireEmptyTables(targetQuery, catalog.controls);
+    }
     const sourceInfo = await tx.execute(`PRAGMA table_info(${quote(def.name)})`);
     if (!columnLayoutMatches(sourceInfo.rows as unknown as { name: unknown; pk: unknown }[], def))
       throw Error("PREFLIGHT_SOURCE_SCHEMA_MISMATCH");
@@ -116,6 +125,7 @@ export async function inspectFreeMigrationTable(
       "PREFLIGHT_UNSUPPORTED_SOURCE_VALUE", "PREFLIGHT_OWNER_MISMATCH",
       "PREFLIGHT_DESTINATION_SCHEMA_MISMATCH",
       "PREFLIGHT_SOURCE_FOREIGN_KEY_MISMATCH", "PREFLIGHT_DESTINATION_FOREIGN_KEY_MISMATCH",
+      "INVENTORY_SOURCE_MISMATCH", "INVENTORY_DESTINATION_MISMATCH", "INVENTORY_DESTINATION_OCCUPIED",
     ]);
     throw Error(safe.has(code) ? code : "PREFLIGHT_QUERY_FAILED");
   } finally {
@@ -124,8 +134,8 @@ export async function inspectFreeMigrationTable(
 }
 
 /** Planning reserves only, not a bill, a CPU prediction, or a cutover authorization.
- * Assumes indexed keyset traversal, four single-row passes, two audit passes,
- * and eight D1 writes per invocation reserved for indexed progress/attempt records.
+ * One UTC day, no retries: copy, target verification, source verification,
+ * one witness check per owner and two initialization operations.
  * Actual query meta and account-wide usage must be rechecked during execution.
  */
 export function planFreeD1Migration(tables: readonly TablePreflight[], usage?: FreeUsage) {
@@ -142,13 +152,14 @@ export function planFreeD1Migration(tables: readonly TablePreflight[], usage?: F
   }
   const sum = (f: (t: TablePreflight) => number) => natural(tables.reduce((n, t) => n + f(t), 0));
   const rows = sum((t) => t.rows);
-  const auditRows = tables.find((t) => t.table === "audit_event")!.rows;
-  const steps = natural(4 * rows + 2 * auditRows + tables.length * 8 + 16);
+  const users = tables.find((t) => t.table === "user")!.rows;
+  const steps = natural(2 + 3 * (rows + tables.length) + users);
+  const projectedDataBytes = natural(sum((t) => t.rawBytes * (t.destinationIndexCount + 2) + t.rows * 4096) + 65536);
   const reserve = {
-    workerRequests: steps,
-    d1RowsRead: natural(rows * 10 + steps * 4),
-    d1RowsWritten: natural(sum((t) => t.rows * (t.destinationIndexCount + 1)) + steps * 8),
-    additionalStorageBytes: natural(sum((t) => t.rawBytes * (t.destinationIndexCount + 2) + t.rows * 4096) + 65536),
+    workerRequests: natural(steps * STEP_RESERVE.requests),
+    d1RowsRead: natural(steps * STEP_RESERVE.reads),
+    d1RowsWritten: natural(steps * STEP_RESERVE.writes),
+    additionalStorageBytes: Math.max(projectedDataBytes, natural(steps * STEP_RESERVE.storageBytes)),
   };
   const blockers: string[] = [];
   if (tables.some((t) => t.destinationRows)) blockers.push("DESTINATION_NOT_EMPTY");
@@ -169,11 +180,12 @@ export function planFreeD1Migration(tables: readonly TablePreflight[], usage?: F
     if (usage.destinationStorageBytes + reserve.additionalStorageBytes > FREE_D1_PLANNING_LIMITS.databaseBytes) blockers.push("DATABASE_STORAGE_RESERVE_EXCEEDED");
   }
   return {
-    proposal: "bounded-resumable-v2" as const, rows, largeRowTables, planningReserve: reserve,
+    proposal: "bounded-resumable-v2" as const, planningWindow: "single-utc-day" as const, controlledAttemptsWithoutRetries: steps, rows, largeRowTables, planningReserve: reserve,
     planningBlockers: blockers, fitsPlanningReserve: blockers.length === 0,
     // Never generate the existing activation receipt or silently select D1.
     cutoverAllowed: false as const, migrationImplemented: false as const,
-    stillRequired: ["BOUNDED_RUNNER_AND_EXECUTION_LIMITS", "DATABASE_INVENTORY_AND_CONTROL_SCHEMA", "SOURCE_WRITE_FREEZE", "SOURCE_AND_TARGET_DIGEST_PASSES",
-      "AUDIT_AND_INDEPENDENT_WITNESS", "REAL_FREE_CPU_MEASUREMENT", "APPLICATION_AND_OWNER_VERIFICATION"],
+    stillRequired: ["LIVE_INVENTORY_AND_SOURCE_IDENTIFICATION", "LIVE_USAGE_AND_EXECUTION_POLICY",
+      "SOURCE_WRITE_FREEZE", "REAL_FREE_CPU_MEASUREMENT", "MEASURED_ROWS_AND_SUBREQUESTS",
+      "CONTROLLED_ORCHESTRATION_AND_FINAL_RECEIPT", "APPLICATION_AND_OWNER_VERIFICATION"],
   };
 }

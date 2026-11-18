@@ -10,16 +10,12 @@ import { atomicCheckedBatch } from "../cloudflare/d1/atomic-batch";
 import { readBoundedMigrationRow } from "./d1-bounded-reader";
 import { STREAM_FORMAT, streamStart, streamRow, streamBoundary } from "./d1-stream-digest";
 import { assertBusinessSchema } from "./d1-schema-guard";
+import { inspectCatalog, queryInventorySession, emptyTablesCondition, assertVerificationControls } from "./d1-inventory";
 import { BUSINESS_SCHEMA_CONTRACT } from "./d1-schema-contract";
 
-export const COPY_CHECKPOINT_SCHEMA = `CREATE TABLE cockpit_copy_checkpoint (
- slot INTEGER PRIMARY KEY CHECK(slot=1), run_id TEXT NOT NULL,
- schema_hash TEXT NOT NULL, scope_hash TEXT NOT NULL, copy_hash TEXT NOT NULL,
- revision INTEGER NOT NULL CHECK(revision>=0), table_index INTEGER NOT NULL,
- cursor_json TEXT, table_rows INTEGER NOT NULL CHECK(table_rows>=0),
- total_rows INTEGER NOT NULL CHECK(total_rows>=0), total_bytes INTEGER NOT NULL CHECK(total_bytes>=0),
- phase TEXT NOT NULL CHECK(phase IN ('copying','copied'))
-)`;
+import { mutationFence, type ExecutionFence } from "./d1-execution-schema";
+
+export { COPY_CHECKPOINT_SCHEMA } from "./d1-control-schema";
 export type CopyScope = {
   maintenanceConfirmed: boolean;
   destinationDetached: boolean;
@@ -31,7 +27,7 @@ export type CopyScope = {
 const quote = (name: string) => '"' + name.replaceAll('"', '""') + '"';
 const encode = new TextEncoder();
 const TOTAL_ROWS = 2000, TOTAL_BYTES = 16 * 1024 * 1024;
-const legacyTables = ["cockpit_cutover_receipt", "cockpit_migration_run", "cockpit_migration_row", "cockpit_copy_verification"];
+
 const safeCodes = new Set([
   "COPY_SCOPE_REQUIRED", "COPY_INVALID_RUN", "COPY_CONTEXT_MISMATCH", "COPY_CHECKPOINT_INVALID",
   "COPY_NOT_STARTED", "COPY_STALE_REVISION", "COPY_SCHEMA_MISMATCH", "COPY_CAPACITY_EXCEEDED",
@@ -97,42 +93,40 @@ function summary(cp: Checkpoint) {
     jsonBytesCopied: cp.total_bytes, phase: cp.phase, verified: false as const, cutoverAllowed: false as const };
 }
 export async function checkCopyLayout(db: D1DatabaseSession, indices: number[]) {
-  // The rollback assertion is a security invariant, not just a table name.
-  const controls = await db.prepare("SELECT name,sql FROM sqlite_schema WHERE type='table' AND name IN ('cockpit_copy_checkpoint','cockpit_atomic_assertion')").all<{ name: string; sql: string }>();
-  const canonical = (sql: string) => sql.replace(/\s+/g, "").replace(/ifnotexists/ig, "").toLowerCase();
-  const assertion = "CREATE TABLE cockpit_atomic_assertion(id TEXT PRIMARY KEY,ok INTEGER NOT NULL CHECK(ok=1))";
-  if (controls.results.length !== 2 || controls.results.some(r => canonical(r.sql) !==
-      canonical(r.name === "cockpit_copy_checkpoint" ? COPY_CHECKPOINT_SCHEMA : assertion)))
+  const query = queryInventorySession(db);
+  let catalog;
+  try { catalog = await inspectCatalog(query, "destination"); }
+  catch (error) {
+    throw Error(error instanceof Error && error.message === "INVENTORY_DESTINATION_MISMATCH" ? "COPY_SCHEMA_MISMATCH" : "COPY_QUERY_FAILED");
+  }
+  if (!["cockpit_copy_checkpoint", "cockpit_atomic_assertion"].every(t => catalog.controls.includes(t)))
     throw Error("COPY_SCHEMA_MISMATCH");
-  const rows = indices.length ? await db.batch<{ name: string; pk: number }>(indices.map(i => db.prepare(`PRAGMA table_info(${quote(definitions[i].name)})`))) : [];
-  for (let n = 0; n < indices.length; n++) {
-    const def = definitions[indices[n]], info = rows[n].results;
-    if (info.length !== def.columns.length || !def.columns.every(c => info.some(r => r.name === c)) ||
-        JSON.stringify(info.filter(r => r.pk > 0).sort((a, b) => a.pk - b.pk).map(r => r.name)) !== JSON.stringify(def.keys))
-      throw Error("COPY_SCHEMA_MISMATCH");
-    try { await assertBusinessSchema(async (sql, args) => (await db.prepare(sql).bind(...args).all<Record<string, unknown>>()).results, def.name); }
+  // The pinned CREATE TABLE includes every column and the ordered primary key.
+  // The schema tests check these same bytes against the ORM migration definitions.
+  for (const index of indices) {
+    try { await assertBusinessSchema(query, definitions[index].name); }
     catch (error) {
       throw Error(error instanceof Error && error.message === "SCHEMA_DEFINITION_MISMATCH" ? "COPY_SCHEMA_MISMATCH" : "COPY_QUERY_FAILED");
     }
   }
-  if (await db.prepare("SELECT 1 FROM sqlite_schema WHERE type='trigger' LIMIT 1").first())
-    throw Error("COPY_SCHEMA_MISMATCH");
+  return catalog;
 }
 
 /** Provision COPY_CHECKPOINT_SCHEMA + existing business/assertion schemas only in
  * a detached target first. Never auto-create/clear/replace business tables here.
  * A response lost after commit requires getBoundedCopyStatus with the SAME run.
  */
-export async function initializeBoundedCopy(target: D1Database, runId: string, scope: CopyScope) {
+export async function initializeBoundedCopy(target: D1Database, runId: string, scope: CopyScope, fence?: ExecutionFence) {
   try {
     const ctx = await context(runId, scope), db = target.withSession("first-primary");
-    await checkCopyLayout(db, definitions.map((_, i) => i));
-    const legacy = await db.prepare(`SELECT name FROM sqlite_schema WHERE type='table' AND name IN (${legacyTables.map(() => "?").join(",")})`).bind(...legacyTables).all<{ name: string }>();
-    const emptiness = [...definitions.map(d => d.name), ...legacy.results.map(r => r.name), "cockpit_copy_checkpoint", "cockpit_atomic_assertion"]
-      .map(name => `NOT EXISTS(SELECT 1 FROM ${quote(name)})`).join(" AND ");
+    const catalog = await checkCopyLayout(db, definitions.map((_, i) => i));
+    const controlsToCheck = catalog.controls.filter(name => !fence || name !== "cockpit_execution_control");
+    const emptiness = emptyTablesCondition([...definitions.map(d => d.name), ...controlsToCheck]);
     try {
+      // Check the originally empty assertion table before this batch adds its own scratch rows.
+      // The trailing lease check still rolls the entire batch back on expiry or takeover.
       await atomicCheckedBatch(db, [{ statement: db.prepare(`INSERT INTO cockpit_copy_checkpoint(slot,run_id,schema_hash,scope_hash,copy_hash,revision,table_index,cursor_json,table_rows,total_rows,total_bytes,phase) SELECT 1,?,?,?,?,0,0,NULL,0,0,0,'copying' WHERE ${emptiness}`)
-        .bind(runId, ctx.schemaHash, ctx.scopeHash, await streamStart(runId, ctx.schemaHash, ctx.scopeHash)), expectedChanges: 1 }]);
+        .bind(runId, ctx.schemaHash, ctx.scopeHash, await streamStart(runId, ctx.schemaHash, ctx.scopeHash)), expectedChanges: 1 }, mutationFence(db, fence)]);
     } catch { throw Error("COPY_INITIALIZE_UNCONFIRMED"); }
     return summary(await load(db, runId, ctx));
   } catch (error) { throw safeError(error); }
@@ -148,7 +142,10 @@ export async function getBoundedCopyStatus(target: D1Database, runId: string, sc
 export async function getCopyVerificationBinding(target: D1Database, runId: string, scope: CopyScope) {
   try {
     const ctx = await context(runId, scope), db = target.withSession("first-primary");
-    await checkCopyLayout(db, []);
+    try { await assertVerificationControls(db); }
+    catch (error) {
+      throw Error(error instanceof Error && error.message === "INVENTORY_DESTINATION_MISMATCH" ? "COPY_SCHEMA_MISMATCH" : "COPY_QUERY_FAILED");
+    }
     const cp = await load(db, runId, ctx);
     if (cp.phase !== "copied") throw Error("COPY_NOT_STARTED");
     return { runId, schemaHash: ctx.schemaHash, scopeHash: ctx.scopeHash,
@@ -162,7 +159,7 @@ export async function getCopyVerificationBinding(target: D1Database, runId: stri
  * All source readers are read-only. The CAS and INSERT commit or roll back together.
  */
 export async function copyBoundedStep(source: Pick<Client, "transaction">, target: D1Database,
-  runId: string, expectedRevision: number, scope: CopyScope) {
+  runId: string, expectedRevision: number, scope: CopyScope, fence?: ExecutionFence) {
   try {
     const ctx = await context(runId, scope), db = target.withSession("first-primary");
     if (!natural(expectedRevision)) throw Error("COPY_STALE_REVISION");
@@ -193,7 +190,7 @@ export async function copyBoundedStep(source: Pick<Client, "transaction">, targe
         runId, ctx.schemaHash, ctx.scopeHash, cp.revision, cp.table_index, cp.cursor_json, cp.table_rows, cp.total_rows, cp.total_bytes, cp.copy_hash);
     const mutations = [{ statement: update, expectedChanges: 1 }];
     if (!row.done) mutations.push({ statement: db.prepare(`INSERT INTO ${quote(def.name)} (${def.columns.map(quote).join(",")}) VALUES (${def.columns.map(() => "?").join(",")})`).bind(...row.values), expectedChanges: 1 });
-    try { await atomicCheckedBatch(db, mutations); }
+    try { await atomicCheckedBatch(db, [mutationFence(db, fence), ...mutations]); }
     catch { throw Error("COPY_COMMIT_UNCONFIRMED"); }
     return summary(next);
   } catch (error) { throw safeError(error); }

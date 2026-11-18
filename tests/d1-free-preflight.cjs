@@ -61,6 +61,18 @@ module.exports = async function runFreePreflightTests() {
     const usage = { rowsReadToday: 0, rowsWrittenToday: 0, workerRequestsToday: 0, accountStorageBytes: 262144, destinationStorageBytes: 262144 };
     const plan = planFreeD1Migration(tables, usage);
     assert.equal(plan.fitsPlanningReserve, true); assert.equal(plan.cutoverAllowed, false); assert.equal(plan.migrationImplemented, false);
+    // Two stored rows, 18 table boundaries per pass, two initializations and one witness check.
+    const admissions = 2 + 3 * (2 + 18) + 1;
+    assert.equal(plan.controlledAttemptsWithoutRetries, admissions);
+    assert.equal(plan.planningWindow, 'single-utc-day');
+    assert.deepEqual(plan.planningReserve, {
+      workerRequests: admissions * 4, d1RowsRead: admissions * 16384,
+      d1RowsWritten: admissions * 128, additionalStorageBytes: admissions * 131072,
+    });
+    const lastReadBudget = { ...usage, rowsReadToday: 5000000 - admissions * 16384 };
+    assert.equal(planFreeD1Migration(tables, lastReadBudget).fitsPlanningReserve, true);
+    assert.ok(planFreeD1Migration(tables, { ...lastReadBudget, rowsReadToday: lastReadBudget.rowsReadToday + 1 })
+      .planningBlockers.includes('DAILY_READ_RESERVE_EXCEEDED'));
     assert.ok(plan.stillRequired.includes('REAL_FREE_CPU_MEASUREMENT'));
     assert.ok(planFreeD1Migration(tables).planningBlockers.includes('ACCOUNT_USAGE_NOT_CHECKED'));
     for (const [key, value, code] of [
