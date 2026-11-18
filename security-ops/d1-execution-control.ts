@@ -5,7 +5,7 @@ import type { Client } from "@libsql/client";
 import type { D1Database, D1DatabaseSession } from "@cloudflare/workers-types";
 import type { WitnessService } from "../packages/web/src/api/database/d1/witness";
 import { initializeBoundedCopy, copyBoundedStep, type CopyScope } from "./d1-copy-checkpoint";
-import { initializeCopyVerification, verifyCopyStep } from "./d1-copy-verification";
+import { initializeCopyVerification, verifyCopyStep, finalizeCopyReceipt } from "./d1-copy-verification";
 import { FREE_D1_PLANNING_LIMITS as FREE, type FreeUsage } from "./d1-free-preflight";
 import { inspectMigrationInventory } from "./d1-inventory";
 import { DB_NOW_MS, UTC_DAY, EXECUTION_CONTROL_SCHEMA, STEP_RESERVE } from "./d1-execution-schema";
@@ -21,7 +21,7 @@ export type ExecutionPolicy = Readonly<{
   dailyReads: number; dailyWrites: number; dailyRequests: number;
 }>;
 type Usage = Readonly<FreeUsage & { observedAtMs: number }>;
-type Operation = "initialize-copy" | "copy" | "initialize-verification" | "verify";
+type Operation = "initialize-copy" | "copy" | "initialize-verification" | "verify" | "finalize";
 type Source = Pick<Client, "transaction">;
 type Step = Readonly<{
   source: Source; target: D1Database; runId: string; scope: CopyScope;
@@ -51,9 +51,12 @@ function validateUsage(u: Usage) {
 async function checkLedger(db: D1DatabaseSession) {
   const row = await db.prepare(`SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE type='table'
     AND name='cockpit_execution_control' AND sql=?) AND NOT EXISTS(SELECT 1 FROM main.sqlite_schema
-    WHERE tbl_name='cockpit_execution_control' COLLATE NOCASE AND type<>'table') AS valid`)
-    .bind(EXECUTION_CONTROL_SCHEMA).first<{ valid: number }>();
+    WHERE tbl_name='cockpit_execution_control' COLLATE NOCASE AND type<>'table') AS valid,
+    (SELECT type FROM main.sqlite_schema WHERE name='cockpit_cutover_receipt' COLLATE NOCASE) AS receipt_type`)
+    .bind(EXECUTION_CONTROL_SCHEMA).first<{ valid: number; receipt_type: string | null }>();
   if (row?.valid !== 1) throw Error("EXECUTION_SCHEMA_MISMATCH");
+  if (row.receipt_type !== null && row.receipt_type !== "table") throw Error("EXECUTION_SCHEMA_MISMATCH");
+  return row.receipt_type === "table";
 }
 function cleanError(error: unknown) {
   const message = error instanceof Error ? error.message : "";
@@ -129,7 +132,7 @@ const reserveSql = `UPDATE cockpit_execution_control SET attempts=attempts+1, ut
 export async function runControlledMigrationStep(input: Step) {
   const { source, target, runId, expectedRevision, operation, witness } = input;
   validateRun(runId);
-  if (!["initialize-copy", "copy", "initialize-verification", "verify"].includes(operation) || !validInteger(expectedRevision, 0) ||
+  if (!["initialize-copy", "copy", "initialize-verification", "verify", "finalize"].includes(operation) || !validInteger(expectedRevision, 0) ||
       (operation.startsWith("initialize-") && expectedRevision !== 0)) throw Error("EXECUTION_INVALID_OPERATION");
   if (input.scope?.maintenanceConfirmed !== true || input.scope.destinationDetached !== true || !Array.isArray(input.scope.ownerEmails))
     throw Error("COPY_SCOPE_REQUIRED");
@@ -138,8 +141,14 @@ export async function runControlledMigrationStep(input: Step) {
   validateUsage(u);
   const db = target.withSession("first-primary"), fence = { runId, token: crypto.randomUUID() };
   try {
-    await checkLedger(db);
-    const claim = await db.prepare(reserveSql).bind(runId, u.observedAtMs, u.rowsReadToday, u.rowsWrittenToday,
+    const hasReceiptTable = await checkLedger(db);
+    // An operator may have read "unfinished" just before another call finalized.
+    // Stop this late request inside the reservation UPDATE, including for a raw
+    // controlled-step caller. Older detached targets can lack the receipt table.
+    const unfinished = hasReceiptTable
+      ? " AND NOT EXISTS(SELECT 1 FROM main.cockpit_cutover_receipt)"
+      : " AND NOT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE name='cockpit_cutover_receipt' COLLATE NOCASE)";
+    const claim = await db.prepare(reserveSql + unfinished).bind(runId, u.observedAtMs, u.rowsReadToday, u.rowsWrittenToday,
       u.workerRequestsToday, u.accountStorageBytes, u.destinationStorageBytes, fence.token).run();
     if (claim.meta.changes !== 1) throw Error("EXECUTION_DENIED");
   } catch (error) { throw cleanError(error); }
@@ -153,6 +162,7 @@ export async function runControlledMigrationStep(input: Step) {
     case "copy": result = await copyBoundedStep(source, target, runId, expectedRevision, scope, fence); break;
     case "initialize-verification": result = await initializeCopyVerification(target, runId, scope, fence); break;
     case "verify": result = await verifyCopyStep(source, target, runId, expectedRevision, scope, witness, fence); break;
+    case "finalize": result = await finalizeCopyReceipt(target, runId, expectedRevision, scope, fence); break;
   }
   try {
     const release = await db.prepare(`UPDATE cockpit_execution_control SET lease_token=NULL,lease_until_ms=0
