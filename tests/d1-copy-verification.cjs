@@ -83,6 +83,11 @@ module.exports = async function verifyCopies({ source, template, defs, scope, ru
     assert.equal((await status(databases.SOURCE, runId, scope)).phase, 'failed');
 
     await start(databases.SCHEMA, runId, scope);
+    await databases.SCHEMA.prepare('CREATE TRIGGER added_control_trigger AFTER UPDATE ON cockpit_copy_verification BEGIN SELECT 1; END').run();
+    await assert.rejects(step(readonly, databases.SCHEMA, runId, 0, scope), /^Error: VERIFY_SCHEMA_MISMATCH$/);
+    await assert.rejects(status(databases.SCHEMA, runId, scope), /^Error: VERIFY_SCHEMA_MISMATCH$/);
+    assert.equal((await databases.SCHEMA.prepare('SELECT revision FROM cockpit_copy_verification').first()).revision, 0);
+    await databases.SCHEMA.prepare('DROP TRIGGER added_control_trigger').run();
     await databases.SCHEMA.prepare('DROP INDEX user_email_unique').run();
     await assert.rejects(step(readonly, databases.SCHEMA, runId, 0, scope), /^Error: BOUNDED_SCHEMA_MISMATCH$/);
     assert.equal((await status(databases.SCHEMA, runId, scope)).phase, 'failed');

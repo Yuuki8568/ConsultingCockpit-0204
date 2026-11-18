@@ -128,15 +128,15 @@ module.exports = async function runCopyCheckpointTests() {
     await dbs.GUARD.prepare("INSERT INTO security_counter VALUES ('occupied',0,1)").run();
     await assert.rejects(start(dbs.GUARD, runId, scope), /^Error: COPY_INITIALIZE_UNCONFIRMED$/);
     await dbs.GUARD.prepare('DELETE FROM security_counter').run();
-    await dbs.GUARD.prepare('CREATE TABLE cockpit_cutover_receipt(id TEXT PRIMARY KEY)').run();
-    await dbs.GUARD.prepare("INSERT INTO cockpit_cutover_receipt VALUES ('old-run')").run();
+    await dbs.GUARD.prepare('CREATE TABLE cockpit_cutover_receipt(id TEXT PRIMARY KEY,status TEXT NOT NULL,at_ms INTEGER NOT NULL,manifest TEXT)').run();
+    await dbs.GUARD.prepare("INSERT INTO cockpit_cutover_receipt VALUES ('old-run','failed',0,NULL)").run();
     await assert.rejects(start(dbs.GUARD, runId, scope), /^Error: COPY_INITIALIZE_UNCONFIRMED$/);
     await dbs.GUARD.prepare('DELETE FROM cockpit_cutover_receipt').run();
     await dbs.GUARD.prepare('DROP TABLE cockpit_atomic_assertion').run();
     await dbs.GUARD.prepare('CREATE TABLE cockpit_atomic_assertion(id TEXT PRIMARY KEY,ok INTEGER NOT NULL)').run();
     await assert.rejects(start(dbs.GUARD, runId, scope), /^Error: COPY_SCHEMA_MISMATCH$/);
     await dbs.GUARD.prepare('DROP TABLE cockpit_atomic_assertion').run();
-    await dbs.GUARD.exec(fs.readFileSync('cloudflare/d1/schema.sql', 'utf8').replace(/--[^\n]*/g, '').replace(/\n/g, ' '));
+    await dbs.GUARD.prepare(fs.readFileSync('cloudflare/d1/schema.sql', 'utf8').replace(/--[^\n]*/g, '').trim()).run();
     await start(dbs.GUARD, runId, scope);
     await dbs.GUARD.prepare('CREATE TRIGGER unsafe_copy AFTER INSERT ON user BEGIN SELECT 1; END').run();
     await assert.rejects(step(readonlySource, dbs.GUARD, runId, 0, scope), /^Error: COPY_SCHEMA_MISMATCH$/);

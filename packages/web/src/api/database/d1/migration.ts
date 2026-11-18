@@ -9,6 +9,14 @@ import { auditHash } from "../../security/audit";
 import { witnessHeadD1, type WitnessService } from "./witness";
 import { atomicCheckedBatch } from "../../../../../../cloudflare/d1/atomic-batch";
 
+// Both the legacy copy transaction and receipt mutations use this condition.
+// Even an empty or malformed control object reserves the target for controlled runs.
+export const LEGACY_TARGET_CONDITION = "NOT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE name='cockpit_execution_control' COLLATE NOCASE)";
+async function requireLegacyTarget(destination: D1Database) {
+  const row = await destination.withSession("first-primary").prepare(`SELECT 1 AS allowed WHERE ${LEGACY_TARGET_CONDITION}`).first();
+  if (!row) throw Error("CONTROLLED_DESTINATION");
+}
+
 const quote = (name: string) => '"' + name.replaceAll('"', '""') + '"';
 type Cell = string | number | null;
 type Snapshot = { name: string; columns: string[]; keys: string[]; rows: Cell[][]; digest: string };
@@ -166,6 +174,7 @@ export async function copyToEmptyD1(
   if (!options.maintenanceConfirmed || !options.ownerEmails.length)
     throw Error("MAINTENANCE_REQUIRED");
   const owners = new Set(options.ownerEmails.map((x) => x.trim().toLowerCase()));
+  await requireLegacyTarget(destination);
   const snapshots = await readSource(source, owners);
   await verifyAudit(snapshots, options.witness);
   // Schema and emptiness check includes tables with zero rows in the source.
@@ -191,7 +200,7 @@ export async function copyToEmptyD1(
   const ops = [
     {
       statement: destination
-        .prepare(`INSERT INTO cockpit_atomic_assertion(id,ok) SELECT ?,1 WHERE ${allEmpty}`)
+        .prepare(`INSERT INTO cockpit_atomic_assertion(id,ok) SELECT ?,1 WHERE ${LEGACY_TARGET_CONDITION} AND ${allEmpty}`)
         .bind(sentinel),
       expectedChanges: 1,
     },
@@ -226,9 +235,11 @@ export async function copyToEmptyD1(
     throw Error("DESTINATION_FOREIGN_KEY_MISMATCH");
   // Detect in-flight old Worker/cron writes after the first snapshot. Maintenance is
   // still required: this comparison does not replace the external write freeze.
+  await requireLegacyTarget(destination);
   const after = await readSource(source, owners);
   if (after.some((table, i) => table.digest !== snapshots[i].digest)) throw Error("SOURCE_CHANGED");
   await verifyAudit(after, options.witness);
+  await requireLegacyTarget(destination);
   const manifest = snapshots.map((t) => ({ table: t.name, rows: t.rows.length, sha256: t.digest }));
   return {
     verified: true as const,
