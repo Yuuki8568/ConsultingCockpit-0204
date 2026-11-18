@@ -235,6 +235,8 @@ module.exports = async function runExecutionControlTests() {
     assert.equal(finished.cutoverAllowed, false);
     assert.match(finished.sha256, /^[0-9a-f]{64}$/);
     assert.deepEqual(await readV2Receipt(db), { runId, sha256: finished.sha256 });
+    await assert.rejects(step(db, 'finalize', verification.revision, { witness }), denied);
+    await assert.rejects(step(db, 'verify', verification.revision, { witness }), denied);
     const pinned = (digest, target = db) => selectDatabaseBackend({ COCKPIT_DATABASE_BACKEND: 'd1',
       COCKPIT_D1: target, COCKPIT_D1_MANIFEST_SHA256: digest });
     await assertD1MigrationVerified(pinned('v2:' + finished.sha256));

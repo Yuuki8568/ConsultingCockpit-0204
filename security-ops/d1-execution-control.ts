@@ -51,9 +51,12 @@ function validateUsage(u: Usage) {
 async function checkLedger(db: D1DatabaseSession) {
   const row = await db.prepare(`SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE type='table'
     AND name='cockpit_execution_control' AND sql=?) AND NOT EXISTS(SELECT 1 FROM main.sqlite_schema
-    WHERE tbl_name='cockpit_execution_control' COLLATE NOCASE AND type<>'table') AS valid`)
-    .bind(EXECUTION_CONTROL_SCHEMA).first<{ valid: number }>();
+    WHERE tbl_name='cockpit_execution_control' COLLATE NOCASE AND type<>'table') AS valid,
+    (SELECT type FROM main.sqlite_schema WHERE name='cockpit_cutover_receipt' COLLATE NOCASE) AS receipt_type`)
+    .bind(EXECUTION_CONTROL_SCHEMA).first<{ valid: number; receipt_type: string | null }>();
   if (row?.valid !== 1) throw Error("EXECUTION_SCHEMA_MISMATCH");
+  if (row.receipt_type !== null && row.receipt_type !== "table") throw Error("EXECUTION_SCHEMA_MISMATCH");
+  return row.receipt_type === "table";
 }
 function cleanError(error: unknown) {
   const message = error instanceof Error ? error.message : "";
@@ -138,8 +141,14 @@ export async function runControlledMigrationStep(input: Step) {
   validateUsage(u);
   const db = target.withSession("first-primary"), fence = { runId, token: crypto.randomUUID() };
   try {
-    await checkLedger(db);
-    const claim = await db.prepare(reserveSql).bind(runId, u.observedAtMs, u.rowsReadToday, u.rowsWrittenToday,
+    const hasReceiptTable = await checkLedger(db);
+    // An operator may have read "unfinished" just before another call finalized.
+    // Stop this late request inside the reservation UPDATE, including for a raw
+    // controlled-step caller. Older detached targets can lack the receipt table.
+    const unfinished = hasReceiptTable
+      ? " AND NOT EXISTS(SELECT 1 FROM main.cockpit_cutover_receipt)"
+      : " AND NOT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE name='cockpit_cutover_receipt' COLLATE NOCASE)";
+    const claim = await db.prepare(reserveSql + unfinished).bind(runId, u.observedAtMs, u.rowsReadToday, u.rowsWrittenToday,
       u.workerRequestsToday, u.accountStorageBytes, u.destinationStorageBytes, fence.token).run();
     if (claim.meta.changes !== 1) throw Error("EXECUTION_DENIED");
   } catch (error) { throw cleanError(error); }
