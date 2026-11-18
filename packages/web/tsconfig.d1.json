@@ -9,6 +9,7 @@
     "../../security-ops/d1-copy-checkpoint.ts",
     "../../security-ops/d1-copy-verification.ts",
     "../../security-ops/d1-execution-control.ts",
+    "../../security-ops/d1-orchestration.ts",
     "../../security-ops/d1-inventory.ts"
   ]
 }

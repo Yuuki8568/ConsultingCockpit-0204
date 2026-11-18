@@ -8,11 +8,15 @@ import { atomicCheckedBatch } from "../cloudflare/d1/atomic-batch";
 import { getCopyVerificationBinding, type CopyScope } from "./d1-copy-checkpoint";
 import { readBoundedMigrationRow, readBoundedTargetRow } from "./d1-bounded-reader";
 import { streamRow, streamBoundary } from "./d1-stream-digest";
+import { D1_V2_RECEIPT_ID, hashV2AuditEvidence, makeV2Receipt } from "../packages/web/src/d1-receipt-v2";
+import schemaFile from "../cloudflare/d1/business-schema.sql" with { type: "text" };
+import { BUSINESS_SCHEMA_CONTRACT } from "./d1-schema-contract";
 import type { WitnessService } from "../packages/web/src/api/database/d1/witness";
 import { parseAuditAnchors, captureAuditAnchor, verifyAuditEvent, verifyAuditHead, recheckAuditAnchor } from "./d1-bounded-audit";
 
-import { inspectCatalog, queryInventorySession, assertVerificationControls } from "./d1-inventory";
-import { mutationFence, type ExecutionFence } from "./d1-execution-schema";
+import { inspectCatalog, queryInventorySession, assertVerificationControls, emptyTablesCondition } from "./d1-inventory";
+import { mutationFence, DB_NOW_MS, STEP_RESERVE, type ExecutionFence } from "./d1-execution-schema";
+import { FREE_D1_PLANNING_LIMITS as FREE } from "./d1-free-preflight";
 
 export { COPY_VERIFICATION_SCHEMA } from "./d1-control-schema";
 type Binding = Awaited<ReturnType<typeof getCopyVerificationBinding>>;
@@ -118,6 +122,150 @@ export async function getCopyVerificationStatus(target: D1Database, runId: strin
     const b = await getCopyVerificationBinding(target, runId, scope), db = target.withSession("first-primary");
     return summary(await load(db, b));
   } catch (error) { throw safeError(error); }
+}
+
+// Only the repository's CREATE statements enter this check. Their exact bytes
+// must still match the independent schema contract. Never read unknown DDL
+// into the process when comparing the final schema with this local evidence.
+async function businessReceiptSchema() {
+  const lines = schemaFile.split("\n");
+  if (!lines[0].startsWith("-- ")) throw Error("FINALIZE_SCHEMA_MISMATCH");
+  const statements = new Map<string, string>();
+  for (const part of lines.slice(1).join("\n").split(";")) {
+    const sql = part.trim();
+    if (!sql) continue;
+    const name = /^CREATE (?:UNIQUE )?(?:TABLE|INDEX) `([A-Za-z0-9_]+)` /.exec(sql)?.[1];
+    if (!name || statements.has(name)) throw Error("FINALIZE_SCHEMA_MISMATCH");
+    statements.set(name, sql);
+  }
+  const expected: [string, string | null][] = [];
+  for (const table of BUSINESS_SCHEMA_CONTRACT) {
+    for (const object of table.objects) {
+      const sql = statements.get(object.name) ?? null;
+      if (sql === null ? object.sqlSha256 !== null : object.sqlSha256 === null)
+        throw Error("FINALIZE_SCHEMA_MISMATCH");
+      if (sql !== null) {
+        const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(sql)));
+        if (Array.from(hash, b => b.toString(16).padStart(2, "0")).join("") !== object.sqlSha256)
+          throw Error("FINALIZE_SCHEMA_MISMATCH");
+        statements.delete(object.name);
+      }
+      expected.push([object.name, sql]);
+    }
+  }
+  if (statements.size) throw Error("FINALIZE_SCHEMA_MISMATCH");
+  return JSON.stringify(expected);
+}
+let trustedBusinessSchema: Promise<string> | undefined;
+const exactBusinessSql = `NOT EXISTS(SELECT 1 FROM json_each(?) expected
+  LEFT JOIN main.sqlite_schema actual ON actual.name=json_extract(expected.value,'$[0]')
+  WHERE actual.name IS NULL OR CAST(actual.sql AS BLOB) IS NOT CAST(json_extract(expected.value,'$[1]') AS BLOB))`;
+
+// Repeat the validated catalog projection in the receipt statement. A competing
+// DDL change to a control table, index or trigger must invalidate our check.
+// The projection contains names and known definition IDs, never SQL or payloads.
+async function receiptCatalog(db: D1DatabaseSession) {
+  let projection = "", signature = "";
+  let parameters: (string | number)[] = [];
+  const catalog = await inspectCatalog(async (sql, args) => {
+    projection = `SELECT json_group_array(json_object('name',name,'owner',owner,'type',type,
+      'definition_id',definition_id,'implicit_index',implicit_index) ORDER BY name COLLATE BINARY)
+      AS signature FROM (${sql})`;
+    parameters = args;
+    const row = await db.prepare(projection).bind(...args).first<{ signature: string }>();
+    if (typeof row?.signature !== "string") throw Error("FINALIZE_SCHEMA_MISMATCH");
+    signature = row.signature;
+    return JSON.parse(signature);
+  }, "destination");
+  if (!["cockpit_cutover_receipt", "cockpit_atomic_assertion", "cockpit_copy_checkpoint",
+    "cockpit_copy_verification", "cockpit_execution_control"].every(name => catalog.controls.includes(name)))
+    throw Error("FINALIZE_SCHEMA_MISMATCH");
+  const empty = catalog.controls.filter(name => ["cockpit_migration_run", "cockpit_migration_row",
+    "cockpit_atomic_assertion"].includes(name));
+  trustedBusinessSchema ??= businessReceiptSchema();
+  return { condition: `(${projection})=? AND ${exactBusinessSql} AND ${emptyTablesCondition(empty)}`,
+    args: [...parameters, signature, await trustedBusinessSchema] };
+}
+
+// Recheck the complete matched checkpoint, verification and current admission
+// ledger in the same snapshot as insertion or readback. Daily counters may span
+// a shorter period than the lifetime attempt counter when the run crosses UTC days.
+const matchedRun = `EXISTS(SELECT 1 FROM main.cockpit_copy_checkpoint c
+  JOIN main.cockpit_copy_verification v ON v.slot=c.slot AND v.run_id=c.run_id
+  JOIN main.cockpit_execution_control e ON e.slot=c.slot AND e.run_id=c.run_id
+  WHERE (c.slot=1 AND c.run_id=? AND c.schema_hash=? AND c.scope_hash=? AND c.copy_hash=?)
+    AND (c.revision=? AND c.total_rows=? AND c.total_bytes=? AND c.phase='copied'
+      AND c.table_index=? AND c.cursor_json IS NULL AND c.table_rows=0)
+    AND (v.schema_hash=c.schema_hash AND v.scope_hash=c.scope_hash AND v.copy_hash=c.copy_hash
+      AND v.copy_revision=c.revision AND v.expected_rows=c.total_rows AND v.expected_bytes=c.total_bytes)
+    AND (v.revision=? AND v.phase='matched' AND v.failure_code IS NULL AND v.table_index=c.table_index
+      AND v.cursor_json IS NULL AND v.table_rows=0)
+    AND (v.total_rows=c.total_rows AND v.total_bytes=c.total_bytes AND v.stream_hash=c.copy_hash
+      AND v.witness_index=? AND v.audit_json=?)
+    AND (e.attempts BETWEEN c.revision+v.revision+3 AND e.max_attempts AND e.max_attempts<=12000
+      AND e.attempts*${STEP_RESERVE.storageBytes}<=${FREE.databaseBytes})
+    AND (e.reserved_requests BETWEEN ${STEP_RESERVE.requests} AND e.attempts*${STEP_RESERVE.requests}
+      AND e.reserved_requests % ${STEP_RESERVE.requests}=0
+      AND e.reserved_reads=e.reserved_requests/${STEP_RESERVE.requests}*${STEP_RESERVE.reads}
+      AND e.reserved_writes=e.reserved_requests/${STEP_RESERVE.requests}*${STEP_RESERVE.writes})
+    AND (e.daily_reads<=${FREE.rowsReadPerDay} AND e.daily_writes<=${FREE.rowsWrittenPerDay}
+      AND e.daily_requests<=${FREE.workerRequestsPerDay})
+    AND (e.observed_reads BETWEEN 0 AND ${FREE.rowsReadPerDay}-e.reserved_reads
+      AND e.observed_writes BETWEEN 0 AND ${FREE.rowsWrittenPerDay}-e.reserved_writes
+      AND e.observed_requests BETWEEN 0 AND ${FREE.workerRequestsPerDay}-e.reserved_requests)
+    AND (e.observed_at_ms>0 AND e.utc_day=CAST(e.observed_at_ms/86400000 AS INTEGER)
+      AND e.expires_at_ms>e.observed_at_ms AND e.lease_until_ms<=e.expires_at_ms))`;
+
+async function receiptEvidence(target: D1Database, db: D1DatabaseSession, runId: string, expectedRevision: number, scope: CopyScope) {
+  const catalog = await receiptCatalog(db);
+  const b = await getCopyVerificationBinding(target, runId, scope), p = await load(db, b);
+  if (p.phase !== "matched") throw Error("FINALIZE_NOT_MATCHED");
+  if (!natural(expectedRevision) || p.revision !== expectedRevision) throw Error("FINALIZE_STALE_REVISION");
+  const auditHash = await hashV2AuditEvidence(p.audit_json);
+  const receipt = await makeV2Receipt({ runId, schemaHash: b.schemaHash, scopeHash: b.scopeHash,
+    copyHash: b.copyHash, auditHash, rows: b.totalRows, bytes: b.totalBytes, copyRevision: b.revision,
+    verificationRevision: p.revision, witnesses: p.witness_index });
+  return { ...receipt, condition: `${matchedRun} AND ${catalog.condition}`,
+    args: [...copyArgs(b), definitions.length, p.revision, p.witness_index, p.audit_json, ...catalog.args] };
+}
+
+function finalizationError(error: unknown) {
+  const code = error instanceof Error ? error.message : "";
+  if (["FINALIZE_NOT_MATCHED", "FINALIZE_STALE_REVISION", "FINALIZE_SCHEMA_MISMATCH",
+    "FINALIZE_COMMIT_UNCONFIRMED", "FINALIZE_RECEIPT_MISMATCH"].includes(code)) return Error(code);
+  if (["INVENTORY_DESTINATION_MISMATCH", "COPY_SCHEMA_MISMATCH"].includes(code)) return Error("FINALIZE_SCHEMA_MISMATCH");
+  return Error("FINALIZE_EVIDENCE_INVALID");
+}
+
+/** Single controlled admission. No receipt overwrite, automatic retry or cutover. */
+export async function finalizeCopyReceipt(target: D1Database, runId: string, expectedRevision: number,
+  scope: CopyScope, fence: ExecutionFence) {
+  if (!fence || fence.runId !== runId || !fence.token) throw Error("FINALIZE_FENCE_REQUIRED");
+  try {
+    const db = target.withSession("first-primary");
+    const evidence = await receiptEvidence(target, db, runId, expectedRevision, scope);
+    const insert = db.prepare(`INSERT INTO cockpit_cutover_receipt(id,status,at_ms,manifest)
+      SELECT ?,'verified',${DB_NOW_MS},? WHERE NOT EXISTS(SELECT 1 FROM main.cockpit_cutover_receipt)
+      AND ${evidence.condition}`).bind(D1_V2_RECEIPT_ID, evidence.manifest, ...evidence.args);
+    try {
+      await atomicCheckedBatch(db, [{ statement: insert, expectedChanges: 1 }, mutationFence(db, fence)]);
+    } catch { throw Error("FINALIZE_COMMIT_UNCONFIRMED"); }
+    return { sha256: evidence.sha256, cutoverAllowed: false as const };
+  } catch (error) { throw finalizationError(error); }
+}
+
+/** Recover a lost acknowledgement without consuming a second admission. */
+export async function getFinalizedCopyReceipt(target: D1Database, runId: string, expectedRevision: number, scope: CopyScope) {
+  try {
+    const db = target.withSession("first-primary");
+    const evidence = await receiptEvidence(target, db, runId, expectedRevision, scope);
+    const row = await db.prepare(`SELECT 1 AS ok FROM main.cockpit_cutover_receipt
+      WHERE id=? AND status='verified' AND typeof(at_ms)='integer' AND at_ms>0 AND manifest=?
+      AND NOT EXISTS(SELECT 1 FROM main.cockpit_cutover_receipt WHERE id IS NOT ?)
+      AND ${evidence.condition}`).bind(D1_V2_RECEIPT_ID, evidence.manifest, D1_V2_RECEIPT_ID, ...evidence.args).first();
+    if (!row) throw Error("FINALIZE_RECEIPT_MISMATCH");
+    return { sha256: evidence.sha256, cutoverAllowed: false as const };
+  } catch (error) { throw finalizationError(error); }
 }
 
 /** One stored row, table boundary or final witness recheck per call. Target is read from

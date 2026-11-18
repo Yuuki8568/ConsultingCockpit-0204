@@ -3,6 +3,7 @@ import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import type { D1Database } from "@cloudflare/workers-types";
 import worker from "../src/worker";
 import { assertD1MigrationVerified, selectDatabaseBackend } from "../src/database-backend";
+import { D1_V2_RECEIPT_ID, hashV2AuditEvidence, makeV2Receipt } from "../src/d1-receipt-v2";
 const originalFetch = globalThis.fetch;
 const originalEnv = { ...process.env };
 afterEach(() => {
@@ -138,6 +139,48 @@ test("D1 receipt must be verified, complete, internally consistent and pinned; n
   await expect(
     assertD1MigrationVerified({ ...backend, manifestSha256: badHash }),
   ).rejects.toThrow();
+});
+test("explicit v2 pin accepts only the single canonical completed receipt on the primary", async () => {
+  const anchors = JSON.stringify([{ userId: "synthetic", headSeq: 1, anchorSeq: 1 }]);
+  const evidence = { runId: "00000000-0000-4000-8000-000000000019",
+    schemaHash: "a".repeat(64), scopeHash: "b".repeat(64), copyHash: "c".repeat(64), auditHash: await hashV2AuditEvidence(anchors),
+    rows: 2, bytes: 250, copyRevision: 20, verificationRevision: 41, witnesses: 1 };
+  const receipt = await makeV2Receipt(evidence);
+  const valid = { correct_id: 1, verified: 1, manifest: receipt.manifest };
+  let results = [valid];
+  let matched = true;
+  const db = { withSession(primary: string) {
+    expect(primary).toBe("first-primary");
+    return { prepare(sql: string) {
+      if (sql.includes("JOIN cockpit_execution_control")) return { bind(...args: unknown[]) {
+        expect(args[0]).toBe(evidence.runId);
+        return { first: async () => matched ? { audit_json: anchors } : null };
+      } };
+      expect(sql).toContain("LIMIT 2");
+      return { bind(id: string) {
+        expect(id).toBe(D1_V2_RECEIPT_ID);
+        return { all: async () => ({ results }) };
+      } };
+    } };
+  } } as unknown as D1Database;
+  const env = { COCKPIT_DATABASE_BACKEND: "d1", COCKPIT_D1: db, COCKPIT_D1_MANIFEST_SHA256: "v2:" + receipt.sha256 };
+  const backend = selectDatabaseBackend(env);
+  if (backend.kind !== "d1") throw Error("Expected explicit D1 selection");
+  await assertD1MigrationVerified(backend);
+  matched = false;
+  await expect(assertD1MigrationVerified(backend)).rejects.toThrow();
+  matched = true;
+  for (const candidate of [[], [valid, valid], [{ ...valid, correct_id: 0 }], [{ ...valid, verified: 0 }],
+    [{ ...valid, manifest: "{" }], [{ ...valid, manifest: receipt.manifest + " " }],
+    [{ ...valid, manifest: JSON.stringify({ ...JSON.parse(receipt.manifest), cutoverAllowed: true }) }],
+    [{ ...valid, manifest: (await makeV2Receipt({ ...evidence, auditHash: "e".repeat(64) })).manifest }]]) {
+    results = candidate;
+    await expect(assertD1MigrationVerified(backend)).rejects.toThrow();
+  }
+  await expect(makeV2Receipt({ ...evidence, copyRevision: 19 })).rejects.toThrow();
+  await expect(makeV2Receipt({ ...evidence, verificationRevision: 40 })).rejects.toThrow();
+  expect(() => selectDatabaseBackend({ ...env, COCKPIT_D1_MANIFEST_SHA256: "v2:pending" })).toThrow();
+  expect(selectDatabaseBackend({ ...env, COCKPIT_DATABASE_BACKEND: "libsql" })).toEqual({ kind: "libsql" });
 });
 test("Worker D1 dispatch requires Access before receipt reads; serves D1 API without libSQL credentials and refuses invalid receipt", async () => {
   const f = await fixture();

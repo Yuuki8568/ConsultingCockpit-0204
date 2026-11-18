@@ -1,4 +1,5 @@
 import type { D1Database } from "@cloudflare/workers-types";
+import { readV2Receipt } from "./d1-receipt-v2";
 
 export interface DatabaseBindings {
   COCKPIT_DATABASE_BACKEND?: string;
@@ -30,14 +31,16 @@ const TABLES = [
   "write_identity",
 ];
 const HASH = /^[0-9a-f]{64}$/;
+const V2_PIN = /^v2:[0-9a-f]{64}$/;
 
 /** An explicit invalid choice must fail closed, never silently use the old database. */
 export function selectDatabaseBackend(env: DatabaseBindings): DatabaseBackend {
   const choice = env.COCKPIT_DATABASE_BACKEND ?? "libsql";
   if (choice === "libsql") return { kind: "libsql" };
-  if (choice !== "d1" || !env.COCKPIT_D1 || !HASH.test(env.COCKPIT_D1_MANIFEST_SHA256 ?? ""))
+  const pin = env.COCKPIT_D1_MANIFEST_SHA256 ?? "";
+  if (choice !== "d1" || !env.COCKPIT_D1 || !(HASH.test(pin) || V2_PIN.test(pin)))
     throw Error("Database configuration incomplete");
-  return { kind: "d1", db: env.COCKPIT_D1, manifestSha256: env.COCKPIT_D1_MANIFEST_SHA256! };
+  return { kind: "d1", db: env.COCKPIT_D1, manifestSha256: pin };
 }
 
 /** Recheck the private migration receipt on each invocation; do not cache a failed
@@ -45,9 +48,16 @@ export function selectDatabaseBackend(env: DatabaseBindings): DatabaseBackend {
  * to the reviewed copy, while the target remains free to receive normal future writes.
  */
 export async function assertD1MigrationVerified(backend: Extract<DatabaseBackend, { kind: "d1" }>) {
+  if (V2_PIN.test(backend.manifestSha256)) {
+    const receipt = await readV2Receipt(backend.db);
+    if (!receipt || "v2:" + receipt.sha256 !== backend.manifestSha256) throw Error("D1 migration manifest mismatch");
+    return;
+  }
   const row = await backend.db
     .prepare(
-      "SELECT status,manifest FROM cockpit_cutover_receipt WHERE id=? AND length(manifest)<=16384",
+      "SELECT status,manifest FROM cockpit_cutover_receipt r WHERE id=? AND length(manifest)<=16384 " +
+      "AND NOT EXISTS(SELECT 1 FROM cockpit_cutover_receipt other WHERE other.id IS NOT r.id) " +
+      "AND NOT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE name='cockpit_execution_control' COLLATE NOCASE)",
     )
     .bind(RECEIPT_ID)
     .first<{ status: string; manifest: string }>();

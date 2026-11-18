@@ -5,7 +5,7 @@ import type { Client } from "@libsql/client";
 import type { D1Database, D1DatabaseSession } from "@cloudflare/workers-types";
 import type { WitnessService } from "../packages/web/src/api/database/d1/witness";
 import { initializeBoundedCopy, copyBoundedStep, type CopyScope } from "./d1-copy-checkpoint";
-import { initializeCopyVerification, verifyCopyStep } from "./d1-copy-verification";
+import { initializeCopyVerification, verifyCopyStep, finalizeCopyReceipt } from "./d1-copy-verification";
 import { FREE_D1_PLANNING_LIMITS as FREE, type FreeUsage } from "./d1-free-preflight";
 import { inspectMigrationInventory } from "./d1-inventory";
 import { DB_NOW_MS, UTC_DAY, EXECUTION_CONTROL_SCHEMA, STEP_RESERVE } from "./d1-execution-schema";
@@ -21,7 +21,7 @@ export type ExecutionPolicy = Readonly<{
   dailyReads: number; dailyWrites: number; dailyRequests: number;
 }>;
 type Usage = Readonly<FreeUsage & { observedAtMs: number }>;
-type Operation = "initialize-copy" | "copy" | "initialize-verification" | "verify";
+type Operation = "initialize-copy" | "copy" | "initialize-verification" | "verify" | "finalize";
 type Source = Pick<Client, "transaction">;
 type Step = Readonly<{
   source: Source; target: D1Database; runId: string; scope: CopyScope;
@@ -129,7 +129,7 @@ const reserveSql = `UPDATE cockpit_execution_control SET attempts=attempts+1, ut
 export async function runControlledMigrationStep(input: Step) {
   const { source, target, runId, expectedRevision, operation, witness } = input;
   validateRun(runId);
-  if (!["initialize-copy", "copy", "initialize-verification", "verify"].includes(operation) || !validInteger(expectedRevision, 0) ||
+  if (!["initialize-copy", "copy", "initialize-verification", "verify", "finalize"].includes(operation) || !validInteger(expectedRevision, 0) ||
       (operation.startsWith("initialize-") && expectedRevision !== 0)) throw Error("EXECUTION_INVALID_OPERATION");
   if (input.scope?.maintenanceConfirmed !== true || input.scope.destinationDetached !== true || !Array.isArray(input.scope.ownerEmails))
     throw Error("COPY_SCOPE_REQUIRED");
@@ -153,6 +153,7 @@ export async function runControlledMigrationStep(input: Step) {
     case "copy": result = await copyBoundedStep(source, target, runId, expectedRevision, scope, fence); break;
     case "initialize-verification": result = await initializeCopyVerification(target, runId, scope, fence); break;
     case "verify": result = await verifyCopyStep(source, target, runId, expectedRevision, scope, witness, fence); break;
+    case "finalize": result = await finalizeCopyReceipt(target, runId, expectedRevision, scope, fence); break;
   }
   try {
     const release = await db.prepare(`UPDATE cockpit_execution_control SET lease_token=NULL,lease_until_ms=0

@@ -87,7 +87,7 @@ module.exports = async function runExecutionControlTests() {
   const outputDir = fs.mkdtempSync(path.resolve('packages/web/tests/.execution-control-'));
   const outputFile = path.join(outputDir, 'module.mjs');
   const source = createClient({ url: 'file:' + path.join(temp, 'source.sqlite') });
-  const names = ['RUN', 'ATTEMPTS', 'READS', 'WRITES', 'REQUESTS', 'USAGE', 'EXPIRED', 'FENCED', 'LOSS', 'DAY', 'OBSERVED'];
+  const names = ['RUN', 'ATTEMPTS', 'READS', 'WRITES', 'REQUESTS', 'USAGE', 'EXPIRED', 'FENCED', 'LOSS', 'DAY', 'OBSERVED', 'ORCHESTRATE', 'LEGACY'];
   const options = { modules: true, script: 'export default {fetch(){return new Response("synthetic")}}',
     compatibilityDate: '2026-10-17', d1Databases: names, resourcePersistencePath: path.join(temp, 'd1') };
   let mf;
@@ -95,10 +95,15 @@ module.exports = async function runExecutionControlTests() {
     await build({ stdin: { contents: `export * from './security-ops/d1-execution-control.ts';
       export { COPY_CHECKPOINT_SCHEMA, initializeBoundedCopy, copyBoundedStep } from './security-ops/d1-copy-checkpoint.ts';
       export { COPY_VERIFICATION_SCHEMA } from './security-ops/d1-copy-verification.ts';
+      export { RECEIPT_SCHEMA, runMigrationOnce } from './security-ops/d1-maintenance.ts';
+      export { readV2Receipt } from './packages/web/src/d1-receipt-v2.ts';
+      export { advanceControlledMigration } from './security-ops/d1-orchestration.ts';
+      export { selectDatabaseBackend, assertD1MigrationVerified } from './packages/web/src/database-backend.ts';
       export { auditHash } from './packages/web/src/api/security/audit.ts'`,
       resolveDir: process.cwd(), loader: 'ts' }, platform: 'node', format: 'esm',
       bundle: true, packages: 'external', outfile: outputFile });
-    const { EXECUTION_CONTROL_SCHEMA, COPY_CHECKPOINT_SCHEMA, COPY_VERIFICATION_SCHEMA,
+    const { EXECUTION_CONTROL_SCHEMA, COPY_CHECKPOINT_SCHEMA, COPY_VERIFICATION_SCHEMA, RECEIPT_SCHEMA,
+      readV2Receipt, advanceControlledMigration, selectDatabaseBackend, assertD1MigrationVerified, runMigrationOnce,
       STEP_RESERVE, auditHash, initializeBoundedCopy, copyBoundedStep, initializeExecutionControl, getExecutionControlStatus: status,
       runControlledMigrationStep: run } = await import(pathToFileURL(outputFile));
     mf = new Miniflare(convertV4MiniflareOptions(options));
@@ -120,7 +125,8 @@ module.exports = async function runExecutionControlTests() {
     const databases = {};
     for (const name of names) {
       const db = databases[name] = await mf.getD1Database(name);
-      await db.batch([...ddl, COPY_CHECKPOINT_SCHEMA, COPY_VERIFICATION_SCHEMA, EXECUTION_CONTROL_SCHEMA]
+      const controlled = name === 'LEGACY' ? [] : [COPY_CHECKPOINT_SCHEMA, COPY_VERIFICATION_SCHEMA, EXECUTION_CONTROL_SCHEMA];
+      await db.batch([...ddl, ...controlled, RECEIPT_SCHEMA]
         .map(sql => db.prepare(sql)));
     }
     const measurements = {};
@@ -185,13 +191,117 @@ module.exports = async function runExecutionControlTests() {
     assert.equal(checkpoint.phase, 'copied');
     const witness = { fetch: async () => Response.json({ seq: 2, hash: head }) };
     let verification = await step(db, 'initialize-verification', 0, { witness });
+    // At revision zero there is a completed copy and a real verification record,
+    // but neither independent pass is complete. An attempted finalization must
+    // still consume one reservation and must leave no receipt.
+    await assert.rejects(step(db, 'finalize', 0, { witness }));
+    assert.equal(await readV2Receipt(db), null);
+    assert.equal((await status(db, runId)).leased, true);
+    await db.prepare('UPDATE cockpit_execution_control SET lease_until_ms=unixepoch()*1000-1').run();
     while (verification.phase !== 'matched' && verification.revision < 45) {
       verification = await step(db, 'verify', verification.revision, { witness });
     }
     assert.equal(verification.phase, 'matched');
     assert.equal(verification.auditVerified, true);
     assert.equal(verification.cutoverAllowed, false);
-    assertReservation(await status(db, runId), 2 + checkpoint.revision + verification.revision);
+    const admissionsBeforeFinalize = 3 + checkpoint.revision + verification.revision;
+    assertReservation(await status(db, runId), admissionsBeforeFinalize);
+
+    // Even matching data and a valid fence cannot issue a receipt when the
+    // persisted ledger cannot account for both initializers, both passes and finalize.
+    const minimumTotal = checkpoint.revision + verification.revision + 3;
+    const setSyntheticAdmissions = count => db.prepare(
+      'UPDATE cockpit_execution_control SET attempts=?,reserved_requests=?,reserved_reads=?,reserved_writes=?',
+    ).bind(count, count * STEP_RESERVE.requests, count * STEP_RESERVE.reads, count * STEP_RESERVE.writes).run();
+    await setSyntheticAdmissions(minimumTotal - 2);
+    await assert.rejects(step(db, 'finalize', verification.revision, { witness }), /FINALIZE_COMMIT_UNCONFIRMED/);
+    assert.equal(await readV2Receipt(db), null);
+    assertReservation(await status(db, runId), minimumTotal - 1);
+    await setSyntheticAdmissions(admissionsBeforeFinalize + 1);
+    await db.prepare('UPDATE cockpit_execution_control SET lease_until_ms=unixepoch()*1000-1').run();
+    // The index name, owning table and object type all match the catalog. Only
+    // the indexed column differs from the reviewed definition.
+    const { sql: originalIndex } = await db.prepare("SELECT sql FROM sqlite_schema WHERE name='account_userId_idx'").first();
+    const changedIndex = 'CREATE INDEX account_userId_idx ON account(provider_id)';
+    const replaceIndex = (target, definition) => target.batch([
+      target.prepare('DROP INDEX account_userId_idx'), target.prepare(definition),
+    ]);
+    await replaceIndex(db, changedIndex);
+    await assert.rejects(step(db, 'finalize', verification.revision, { witness }));
+    assert.equal(await readV2Receipt(db), null);
+    await replaceIndex(db, originalIndex);
+    await db.prepare('UPDATE cockpit_execution_control SET lease_until_ms=unixepoch()*1000-1').run();
+    const finished = await step(db, 'finalize', verification.revision, { witness });
+    assert.equal(finished.cutoverAllowed, false);
+    assert.match(finished.sha256, /^[0-9a-f]{64}$/);
+    assert.deepEqual(await readV2Receipt(db), { runId, sha256: finished.sha256 });
+    const pinned = (digest, target = db) => selectDatabaseBackend({ COCKPIT_DATABASE_BACKEND: 'd1',
+      COCKPIT_D1: target, COCKPIT_D1_MANIFEST_SHA256: digest });
+    await assertD1MigrationVerified(pinned('v2:' + finished.sha256));
+    await assert.rejects(assertD1MigrationVerified(pinned('v2:' + '0'.repeat(64))));
+    await assert.rejects(assertD1MigrationVerified(pinned(finished.sha256)));
+    assertReservation(await status(db, runId), admissionsBeforeFinalize + 3);
+    assert.equal(await scalar(db, 'SELECT count(*) n FROM cockpit_cutover_receipt'), 1);
+    await db.prepare('UPDATE cockpit_copy_verification SET revision=revision-1').run();
+    await assert.rejects(assertD1MigrationVerified(pinned('v2:' + finished.sha256)));
+    await db.prepare('UPDATE cockpit_copy_verification SET revision=revision+1').run();
+    const { audit_json: storedAudit } = await db.prepare('SELECT audit_json FROM cockpit_copy_verification').first();
+    await db.prepare("UPDATE cockpit_copy_verification SET audit_json='[]'").run();
+    await assert.rejects(assertD1MigrationVerified(pinned('v2:' + finished.sha256)));
+    await db.prepare('UPDATE cockpit_copy_verification SET audit_json=?').bind(storedAudit).run();
+    await assertD1MigrationVerified(pinned('v2:' + finished.sha256));
+
+    // Generate a genuine legacy pin using its original producer on an independent
+    // database. It works on that target only while the receipt is unambiguous.
+    const legacyId = 'cockpit-d1-cutover-v1';
+    const legacyTarget = databases.LEGACY;
+    assert.deepEqual(await runMigrationOnce(source, legacyTarget, scope.ownerEmails, witness), { started: true, verified: true });
+    const { manifest: legacyManifest } = await legacyTarget.prepare('SELECT manifest FROM cockpit_cutover_receipt').first();
+    const legacyPin = JSON.parse(legacyManifest).sha256;
+    await assertD1MigrationVerified(pinned(legacyPin, legacyTarget));
+    const v2 = await db.prepare('SELECT id,status,at_ms,manifest FROM cockpit_cutover_receipt').first();
+    const insertReceipt = 'INSERT INTO cockpit_cutover_receipt(id,status,at_ms,manifest) VALUES (?,?,?,?)';
+    await legacyTarget.prepare(insertReceipt).bind(v2.id, v2.status, v2.at_ms, v2.manifest).run();
+    await assert.rejects(assertD1MigrationVerified(pinned(legacyPin, legacyTarget)));
+    await db.prepare(insertReceipt).bind(legacyId, 'verified', Date.now(), legacyManifest).run();
+    await assert.rejects(readV2Receipt(db));
+    await assert.rejects(assertD1MigrationVerified(pinned('v2:' + finished.sha256)));
+    await assert.rejects(assertD1MigrationVerified(pinned(legacyPin)));
+    await db.prepare('DELETE FROM cockpit_cutover_receipt WHERE id<>?').bind(legacyId).run();
+    await assert.rejects(readV2Receipt(db));
+    await assert.rejects(assertD1MigrationVerified(pinned('v2:' + finished.sha256)));
+    await assert.rejects(assertD1MigrationVerified(pinned(legacyPin)));
+
+    // Reconstruct the desired operation from persisted progress on every call.
+    // This fixture has 4 rows in 18 tables and one owner verification at the end.
+    const orchestrated = databases.ORCHESTRATE;
+    await initialize(orchestrated, runId, policy());
+    const advance = (extra = {}) => measured('orchestration', counts => advanceControlledMigration({
+      source: meterSource(source, counts), target: meterTarget(orchestrated, counts), runId, scope,
+      usage: usage(), witness: { fetch(request) { counts.witnessCalls++; return witness.fetch(request); } }, ...extra,
+    }));
+    const copySteps = 4 + 18, verificationSteps = copySteps * 2 + 1;
+    const expectedAttempts = 1 + copySteps + 1 + verificationSteps + 1;
+    let completed;
+    for (let attempt = 1; attempt <= expectedAttempts; attempt++) {
+      completed = await advance();
+      assert.equal(completed.cutoverAllowed, false);
+      assert.equal(completed.phase, attempt === expectedAttempts ? 'complete' : 'progress');
+      assertReservation(await status(orchestrated, runId), attempt);
+    }
+    assert.equal(await revision(orchestrated), copySteps);
+    assert.equal(await scalar(orchestrated, 'SELECT revision n FROM cockpit_copy_verification'), verificationSteps);
+    assert.deepEqual(await readV2Receipt(orchestrated), { runId, sha256: completed.sha256 });
+    assert.deepEqual(await advance(), completed);
+    assertReservation(await status(orchestrated, runId), expectedAttempts);
+    await replaceIndex(orchestrated, changedIndex);
+    await assert.rejects(advance());
+    await replaceIndex(orchestrated, originalIndex);
+    assert.deepEqual(await advance(), completed);
+    await assert.rejects(advance({ runId: '00000000-0000-4000-8000-000000000019' }));
+    await assert.rejects(advance({ scope: { ...scope, sourceIdentitySha256: 'b'.repeat(64) } }));
+    assert.equal(await scalar(orchestrated, 'SELECT count(*) n FROM cockpit_cutover_receipt'), 1);
+    assertReservation(await status(orchestrated, runId), expectedAttempts);
 
     for (const [name, limit] of [
       ['ATTEMPTS', { maxAttempts: 1 }], ['READS', { dailyReads: STEP_RESERVE.reads }],
@@ -312,6 +422,7 @@ module.exports = async function runExecutionControlTests() {
     assert.equal(await scalar(reopened, 'SELECT count(*) n FROM cockpit_atomic_assertion'), 0);
     console.log('Measured local controlled operation maxima', JSON.stringify(measurements));
     console.log('PASS controlled migration: durable attempt and daily limits, bounded account usage, expiry, concurrent exclusion, fenced stale writer, ambiguous commit recovery and UTC rollover');
+    console.log('PASS controlled receipt: matched evidence, minimum 70 admissions for fixture, per-call orchestration, durable readback, index drift, runtime pins and legacy compatibility');
   } finally {
     source.close();
     if (mf) await mf.dispose();

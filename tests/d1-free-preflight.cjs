@@ -61,8 +61,8 @@ module.exports = async function runFreePreflightTests() {
     const usage = { rowsReadToday: 0, rowsWrittenToday: 0, workerRequestsToday: 0, accountStorageBytes: 262144, destinationStorageBytes: 262144 };
     const plan = planFreeD1Migration(tables, usage);
     assert.equal(plan.fitsPlanningReserve, true); assert.equal(plan.cutoverAllowed, false); assert.equal(plan.migrationImplemented, false);
-    // Two stored rows, 18 table boundaries per pass, two initializations and one witness check.
-    const admissions = 2 + 3 * (2 + 18) + 1;
+    // Two initializations, a final receipt, three full passes, and one witness check.
+    const admissions = 3 + 3 * (2 + 18) + 1;
     assert.equal(plan.controlledAttemptsWithoutRetries, admissions);
     assert.equal(plan.planningWindow, 'single-utc-day');
     assert.deepEqual(plan.planningReserve, {

@@ -135,7 +135,7 @@ export async function inspectFreeMigrationTable(
 
 /** Planning reserves only, not a bill, a CPU prediction, or a cutover authorization.
  * One UTC day, no retries: copy, target verification, source verification,
- * one witness check per owner and two initialization operations.
+ * one witness check per owner, two initialization operations and one final receipt.
  * Actual query meta and account-wide usage must be rechecked during execution.
  */
 export function planFreeD1Migration(tables: readonly TablePreflight[], usage?: FreeUsage) {
@@ -153,7 +153,7 @@ export function planFreeD1Migration(tables: readonly TablePreflight[], usage?: F
   const sum = (f: (t: TablePreflight) => number) => natural(tables.reduce((n, t) => n + f(t), 0));
   const rows = sum((t) => t.rows);
   const users = tables.find((t) => t.table === "user")!.rows;
-  const steps = natural(2 + 3 * (rows + tables.length) + users);
+  const steps = natural(3 + 3 * (rows + tables.length) + users);
   const projectedDataBytes = natural(sum((t) => t.rawBytes * (t.destinationIndexCount + 2) + t.rows * 4096) + 65536);
   const reserve = {
     workerRequests: natural(steps * STEP_RESERVE.requests),
@@ -186,6 +186,6 @@ export function planFreeD1Migration(tables: readonly TablePreflight[], usage?: F
     cutoverAllowed: false as const, migrationImplemented: false as const,
     stillRequired: ["LIVE_INVENTORY_AND_SOURCE_IDENTIFICATION", "LIVE_USAGE_AND_EXECUTION_POLICY",
       "SOURCE_WRITE_FREEZE", "REAL_FREE_CPU_MEASUREMENT", "MEASURED_ROWS_AND_SUBREQUESTS",
-      "CONTROLLED_ORCHESTRATION_AND_FINAL_RECEIPT", "APPLICATION_AND_OWNER_VERIFICATION"],
+      "LIVE_OPERATOR_EXECUTION", "APPLICATION_AND_OWNER_VERIFICATION"],
   };
 }
