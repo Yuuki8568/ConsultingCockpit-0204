@@ -22,6 +22,7 @@ import { atomicCheckedBatch } from "../../../../../../cloudflare/d1/atomic-batch
 import { createD1Audit } from "./audit";
 import type { WitnessService } from "./witness";
 import { STORAGE_USAGE_SELECTS, summarizeStorageUsage } from "../../security/storage-usage";
+import { statsInput } from "../source-host";
 
 export function createD1Api(d1: D1Database, witness?: WitnessService, readOnly = false) {
   const q = drizzle(d1, { schema: s });
@@ -137,7 +138,7 @@ export function createD1Api(d1: D1Database, witness?: WitnessService, readOnly =
             records: page.changed, cursor: page.cursor, hasMore: page.hasMore,
           };
         }),
-      stats: authed.handler(async ({ context }) => {
+      stats: authed.input(statsInput).handler(async ({ context, input }) => {
         const rows = await q
           .select({
             type: s.record.type,
@@ -153,7 +154,7 @@ export function createD1Api(d1: D1Database, witness?: WitnessService, readOnly =
           byType[r.type] = Number(r.n);
           latest = Math.max(latest, Number(r.latest));
         }
-        return { byType, latestUpdatedAtMs: latest };
+        return { byType, latestUpdatedAtMs: latest, ...(input?.expectedSourceHostSha256 ? { sourceHostMatches: false } : {}) };
       }),
       purgeDeleted: authed.input(unknown).handler(() => {
         throw new ORPCError("FORBIDDEN");

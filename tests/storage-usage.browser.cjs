@@ -21,11 +21,13 @@ import React from 'react';
 import { createRoot } from 'react-dom/client';
 import { StorageUsagePanel } from '/src/web/components/storage-usage';
 import { AuditVerificationControl } from '/src/web/components/audit-verification';
+import { SourceHostCheck } from '/src/web/components/source-host-check';
 window.calls = 0;
+window.hostChecks = [];
 window.auditCalls = 0;
 window.auditInputs = [];
 window.root = createRoot(document.body.appendChild(document.createElement('div')));
-window.root.render(<main style={{ padding: 12, maxWidth: 700 }}><StorageUsagePanel /><AuditVerificationControl /></main>);
+window.root.render(<main style={{ padding: 12, maxWidth: 700 }}><StorageUsagePanel /><AuditVerificationControl /><SourceHostCheck /></main>);
 `,
   );
   const server = spawn(
@@ -57,7 +59,12 @@ window.root.render(<main style={{ padding: 12, maxWidth: 700 }}><StorageUsagePan
         route.fulfill({
           contentType: "application/javascript",
           body: `
-export const client = { vault: { storageUsage: async () => {
+export const client = { sync: { stats: async input => {
+  window.hostChecks.push(input);
+  if (window.hostResult === 'error') throw Error('synthetic-private-provider-error');
+  if (window.hostResult === undefined) return {};
+  return {sourceHostMatches: window.hostResult};
+} }, vault: { storageUsage: async () => {
   window.calls++;
   if (window.shouldFail) throw Error('must not display raw provider error');
   if (window.defer) await new Promise(resolve => { window.finish = resolve; });
@@ -75,6 +82,30 @@ export const client = { vault: { storageUsage: async () => {
       await page.goto("http://127.0.0.1:4193/" + html);
       const button = page.getByRole("button", { name: "保存容量を確認", exact: true });
       await button.waitFor();
+      await page.getByText('移行元の接続先を照合', {exact: true}).click();
+      const hostPin = page.getByLabel('照合用のSHA-256', {exact: false});
+      const check = page.getByRole('button', {name: '接続先を照合', exact: true});
+      await hostPin.fill('invalid');
+      assert.equal(await check.isDisabled(), true);
+      assert.equal(await page.evaluate(() => window.hostChecks.length), 0);
+      await hostPin.fill('a'.repeat(64));
+      await page.evaluate(() => { window.hostResult = true; });
+      await check.click();
+      await page.getByText('接続先が一致しました。', {exact: true}).waitFor();
+      await hostPin.fill('0'.repeat(64));
+      assert.equal(await page.getByText('接続先が一致しました。', {exact: true}).count(), 0);
+      await page.evaluate(() => { window.hostResult = false; });
+      await check.click();
+      await page.getByText('指定した接続先との一致を確認できませんでした。').waitFor();
+      await page.evaluate(() => { window.hostResult = undefined; });
+      await check.click();
+      await page.getByText('照合結果が返りませんでした。').waitFor();
+      await page.evaluate(() => { window.hostResult = 'error'; });
+      await check.click();
+      await page.getByText('照合できませんでした。ログイン状態と通信を確認してください。').waitFor();
+      assert.deepEqual(await page.evaluate(() => window.hostChecks.map(x => x.expectedSourceHostSha256)),
+        ['a'.repeat(64), ...Array(3).fill('0'.repeat(64))]);
+      assert.ok(!(await page.locator('body').innerText()).includes('synthetic-private-provider-error'));
       await page.evaluate(() => {
         window.usage = {
           backend: "d1",
