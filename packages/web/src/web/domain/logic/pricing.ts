@@ -22,6 +22,11 @@ import { buildComplianceFooter } from "./compliance";
 type Any = any;
 
 export const roundToThousand = (n: number): number => Math.round(n / 1000) * 1000;
+/** 旧保存値は税抜のまま維持し、表示・明示入力の境界だけ変換する。
+ * 請求書の消費税額計算ではない（税額は請求書・税率単位で別途切捨て）。 */
+export const legacyNetToGross = (net: number): number => Math.round(net * 11 / 10);
+export const grossToLegacyNet = (gross: number): number => gross * 10 / 11;
+
 export const formatYen = (n: number): string => n.toLocaleString("ja-JP");
 
 export function buildPricingDefaults(c: CaseRecord): PricingInputs {
@@ -91,12 +96,12 @@ export function generateTalk(d: PricingInputs, c: PricingResult): string {
     : d.difficulty === 3 ? '標準的な業務改善案件として、' : '比較的定型的な作業中心ですが、';
   const riskNote = c.riskCoef > 1.10
     ? `また、スコープ変動や決裁プロセスの複雑さを織り込み、約${Math.round((c.riskCoef-1)*100)}%のリスクバッファを乗せています。` : '';
-  const safeText = `もしご予算面でお迷いがありましたら、スコープを絞った【堅実プラン：¥${formatYen(c.safe)}】もご用意できます。`;
+  const safeText = `もしご予算面でお迷いがありましたら、スコープを絞った【堅実プラン：¥${formatYen(legacyNetToGross(c.safe))}（税込）】もご用意できます。`;
   return `【${d.projectTitle}】の単価について、率直にお伝えします。
 
-今回のご依頼は、${difficultyDesc}想定総工数 約${d.hours}時間で、${deliverableText}をお届けする内容です。これに対し、推奨単価は ¥${formatYen(c.recommended)}（税抜）とさせていただきます。
+今回のご依頼は、${difficultyDesc}想定総工数 約${d.hours}時間で、${deliverableText}をお届けする内容です。これに対し、推奨単価は ¥${formatYen(legacyNetToGross(c.recommended))}（税込）とさせていただきます。
 
-この金額は、私の時給ベース（¥${formatYen(d.baseline)}/h）に、難易度・スコープ・体制リスクを加味して算出した、透明性のある積算です。${riskNote}
+この金額は、私の時給ベース（¥${formatYen(legacyNetToGross(d.baseline))}/h・税込）に、難易度・スコープ・体制リスクを加味して算出した、透明性のある積算です。${riskNote}
 
 投資対効果の観点では、本プロジェクトの仕組みが定着すれば、年間で約${expectedSavingHours.toLocaleString('ja-JP')}時間（金額換算で約¥${formatYen(savingMoney)}相当）の業務削減効果が見込まれます。初期投資としてご検討いただける水準かと考えております。
 
@@ -113,7 +118,7 @@ export function buildAlerts(d: PricingInputs, c: PricingResult): PricingAlert[] 
   if (d.scopeRisk === 'high') alerts.push({ title:'スコープ変更リスク高', body:'契約書に「スコープ変更時の追加費用条項」を必ず明記。20%のリスク係数を反映済み。' });
   if (d.experience === 'no') alerts.push({ title:'初挑戦領域', body:'学習コストとして15%の上乗せを反映済み。' });
   if (d.difficulty >= 4 && d.deliverables.length <= 2) alerts.push({ title:'高難度なのに成果物が少なめ', body:'中間成果物（分析メモ・議事録等）を追加すると価格の納得感が高まります。' });
-  if (d.competitor > 0 && c.recommended > d.competitor * 1.5) alerts.push({ title:'競合比で高水準', body:`推奨プラン ¥${formatYen(c.recommended)} は競合の約${Math.round(c.recommended/d.competitor*100)}%。差額の正当性を説明できる資料が必要です。` });
+  if (d.competitor > 0 && c.recommended > d.competitor * 1.5) alerts.push({ title:'競合比で高水準', body:`推奨プラン ¥${formatYen(legacyNetToGross(c.recommended))} は競合の約${Math.round(c.recommended/d.competitor*100)}%。差額の正当性を説明できる資料が必要です。` });
   else if (d.competitor > 0 && c.recommended < d.competitor * 0.7) alerts.push({ title:'競合比で低水準', body:`推奨プランが競合の${Math.round(c.recommended/d.competitor*100)}%。価格上振れの検討余地あり。` });
   if (alerts.length === 0) alerts.push({ title:'特記事項なし', body:'主要なリスク項目に大きな偏りはありません。' });
   return alerts;

@@ -114,6 +114,7 @@ export const auditEvent = sqliteTable(
     /** 直前エントリのハッシュ。連鎖が切れていれば改ざんと判定できる。 */
     prevHash: text("prev_hash").notNull(),
     hash: text("hash").notNull(),
+    hashVersion:integer("hash_version").notNull().default(1),
   },
   (t) => [
     uniqueIndex("audit_user_seq_uidx").on(t.userId, t.seq),
@@ -135,3 +136,42 @@ export const loginEvent = sqliteTable(
   },
   (t) => [index("login_user_at_idx").on(t.userId, t.atMs)],
 );
+
+// Persistent counters: Workers isolates cannot share an in-memory rate limiter.
+export const rateLimit = sqliteTable("rate_limit", {
+  id: text("id").primaryKey(),
+  key: text("key").notNull().unique(),
+  count: integer("count").notNull(),
+  lastRequest: integer("last_request").notNull(),
+});
+
+/** Display history must never be the authority for security throttling. */
+export const securityCounter = sqliteTable("security_counter", {
+  key: text("key").primaryKey(), windowStart: integer("window_start").notNull(), count: integer("count").notNull(),
+});
+/** Immutable through normal synchronization; contains encrypted content and old KDF metadata. */
+export const recordRevision = sqliteTable("record_revision", {
+  id: text("id").primaryKey(), userId: text("user_id").notNull(), recordId: text("record_id").notNull(),
+  archivedAtMs: integer("archived_at_ms").notNull(), snapshot: text("snapshot").notNull(),
+}, t => [index("revision_user_record_idx").on(t.userId, t.recordId, t.archivedAtMs)]);
+export const passkeyCredential = sqliteTable("passkey_credential", {
+  id: text("id").primaryKey(), userId: text("user_id").notNull(), publicKey: text("public_key").notNull(),
+  counter: integer("counter").notNull(), fingerprint: text("fingerprint").notNull(), createdAtMs: integer("created_at_ms").notNull(),
+});
+export const securityChallenge = sqliteTable("security_challenge", {
+  id: text("id").primaryKey(), userId: text("user_id").notNull(), sessionId: text("session_id").notNull(),
+  kind: text("kind").notNull(), challenge: text("challenge").notNull(), action: text("action").notNull(),
+  payloadHash: text("payload_hash").notNull(), expiresAtMs: integer("expires_at_ms").notNull(),
+});
+export const stepUpTicket = sqliteTable("step_up_ticket", {
+  id: text("id").primaryKey(), userId: text("user_id").notNull(), sessionId: text("session_id").notNull(),
+  action: text("action").notNull(), payloadHash: text("payload_hash").notNull(), expiresAtMs: integer("expires_at_ms").notNull(),
+});
+export const deviceSession = sqliteTable("device_session", {
+ sessionId: text("session_id").primaryKey(),userId:text("user_id").notNull(),deviceId:text("device_id").notNull(),createdAtMs:integer("created_at_ms").notNull(),
+});
+export const writeIdentity = sqliteTable("write_identity", {
+ userId:text("user_id").primaryKey(),publicKey:text("public_key").notNull(),privateCiphertext:text("private_ciphertext").notNull(),privateIv:text("private_iv").notNull(),generation:integer("generation").notNull(),version:integer("version").notNull(),
+});
+
+export const auditHead=sqliteTable("audit_head",{userId:text("user_id").primaryKey(),seq:integer("seq").notNull(),hash:text("hash").notNull()});

@@ -2,26 +2,15 @@ import { defineConfig, loadEnv, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwind from "@tailwindcss/vite"
 import path from "path";
-import runableAnalyticsPlugin from "./vite/__plugins/runable-analytics-plugin";
-import honoDevPlugin from "./vite/__plugins/hono-dev-plugin";
+import { execFileSync } from "node:child_process";
+
+
 import assetOptimizerPlugin from "./vite/__plugins/asset-optimizer-plugin";
 
 const root = path.resolve(__dirname, "../..");
 
-/**
- * 本番ビルドの CSP。
- * 開発時は HMR（ws:）と react-refresh のインライン導入が要るため緩いままにし、
- * ビルド成果物だけを厳しくする。
- *  - script-src は 'self' のみ（インライン・eval なし。
- *    枠対策は /frameguard.js、計測は /runable.js と、どちらも外部ファイル）
- *  - connect-src は自分自身と、サインイン基盤・計測の送信先だけ
- *  - style-src の 'unsafe-inline' は画面部品の style 属性が使うため残す
- */
-const PROD_CSP =
-	"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; " +
-	"img-src 'self' data: blob:; media-src 'self' blob:; " +
-	"connect-src 'self' https://api.runable.com https://r.lilstts.com; " +
-	"frame-src 'self'; form-action 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'";
+import { CSP as PROD_CSP } from './src/security-headers';
+import { transcriptionRuntime } from './vite/transcription-runtime';
 
 /** ビルド成果物の CSP メタを本番用に差し替える */
 function strictCspPlugin(): Plugin {
@@ -45,10 +34,12 @@ export default defineConfig(({ mode }) => {
 	Object.assign(process.env, env);
 
 	return {
+        define: { __APP_SOURCE_VERSION__: JSON.stringify(process.env.GITHUB_SHA || execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim()) },
 		// All env files live at the repo root — keep Vite's own env loading there too,
 		// so packages/web/.env* files can never shadow the root .env.
 		envDir: root,
-		plugins: [honoDevPlugin(), react(), runableAnalyticsPlugin(), tailwind(), assetOptimizerPlugin(), strictCspPlugin()],
+		worker: { format: "es" },
+		plugins: [transcriptionRuntime(), react(), tailwind(), assetOptimizerPlugin(), strictCspPlugin()],
 		resolve: {
 			alias: {
 				"@": path.resolve(__dirname, "./src/web"),
@@ -57,7 +48,8 @@ export default defineConfig(({ mode }) => {
 		server: {
 			allowedHosts: true,
 			hmr: { overlay: false, },
-			cors: false
+			cors: false,
+            proxy: { "/api": "http://127.0.0.1:4200" }
 		}
 	};
 });

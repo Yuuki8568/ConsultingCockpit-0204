@@ -1,7 +1,7 @@
 /**
  * 支援メニューの定義と、クライアント条件からの推奨スコアリング。
  * 「何を・どれくらい」を具体的に示すための正本。
- * 金額の目安は 2026-07-25 確定の料金設計（税抜）に揃える。
+ * 金額の目安は 2026-07-25 確定料金を経済価値を変えず税込表示（2026-10-23）に揃える。
  */
 
 export interface ServiceMenuItem {
@@ -21,7 +21,7 @@ export interface ServiceMenuItem {
   deliverables: string[];
   /** この料金に含まれないもの */
   excludes: string[];
-  /** 参考価格レンジ（税抜） */
+  /** 参考価格レンジ（税込） */
   priceLo: number;
   priceHi: number;
   /** 価格の補足 */
@@ -58,9 +58,9 @@ export const SERVICE_MENU_ITEMS: ServiceMenuItem[] = [
       "書類・プロンプト等の作成物",
       "相談後の継続的な質問対応",
     ],
-    priceLo: 30000,
-    priceHi: 30000,
-    priceNote: "¥30,000（税抜）・前払い（入金確認後に日程確定）",
+    priceLo: 33000,
+    priceHi: 33000,
+    priceNote: "¥33,000（税込）・前払い（入金確認後に日程確定）",
     pricingPreset: "spot",
     contractType: "single",
   },
@@ -88,9 +88,9 @@ export const SERVICE_MENU_ITEMS: ServiceMenuItem[] = [
       "プロンプト集などの作成物",
       "診断対象を2件超に広げる場合（別途見積）",
     ],
-    priceLo: 50000,
-    priceHi: 80000,
-    priceNote: "¥50,000〜（税抜）・前払い。対象業務2件以上は ¥80,000〜",
+    priceLo: 55000,
+    priceHi: 88000,
+    priceNote: "¥55,000〜（税込）・前払い。対象業務2件以上は ¥88,000〜",
     contractType: "single",
   },
   {
@@ -118,9 +118,9 @@ export const SERVICE_MENU_ITEMS: ServiceMenuItem[] = [
       "社員向け研修の実施",
       "納品後の質問対応（別途スポット相談として依頼可）",
     ],
-    priceLo: 200000,
-    priceHi: 200000,
-    priceNote: "¥200,000（税抜）・単発・前払い（入金確認後に着手）",
+    priceLo: 220000,
+    priceHi: 220000,
+    priceNote: "¥220,000（税込）・単発・前払い（入金確認後に着手）",
     contractType: "single",
   },
   {
@@ -150,9 +150,9 @@ export const SERVICE_MENU_ITEMS: ServiceMenuItem[] = [
       "他部門への横展開",
       "社内研修（複数人向けの formal な研修）",
     ],
-    priceLo: 150000,
-    priceHi: 180000,
-    priceNote: "月¥150,000〜（税抜）・前払い。対象2件まで。それ以上は ¥200,000〜",
+    priceLo: 165000,
+    priceHi: 198000,
+    priceNote: "月¥165,000〜（税込）・前払い。対象2件まで。それ以上は ¥220,000〜",
     pricingPreset: "intro",
     contractType: "1m",
   },
@@ -185,9 +185,9 @@ export const SERVICE_MENU_ITEMS: ServiceMenuItem[] = [
       "常駐での作業",
       "3ヶ月を超える継続支援（別途「定着サポート」へ）",
     ],
-    priceLo: 550000,
-    priceHi: 600000,
-    priceNote: "¥550,000〜600,000（税抜）・3ヶ月総額・前払い。多部署横断は ¥800,000〜",
+    priceLo: 605000,
+    priceHi: 660000,
+    priceNote: "¥605,000〜660,000（税込）・3ヶ月総額・前払い。多部署横断は ¥880,000〜",
     contractType: "3m",
   },
   {
@@ -210,9 +210,9 @@ export const SERVICE_MENU_ITEMS: ServiceMenuItem[] = [
       "トラブル時の即日対応（翌営業日まで）",
       "社内研修の実施",
     ],
-    priceLo: 80000,
-    priceHi: 100000,
-    priceNote: "月¥80,000〜100,000（税抜）・前払い（当該月の業務開始前まで）。稼働は月8時間まで",
+    priceLo: 88000,
+    priceHi: 110000,
+    priceNote: "月¥88,000〜110,000（税込）・前払い（当該月の業務開始前まで）。稼働は月8時間まで",
     pricingPreset: "monthly",
     contractType: "monthly",
   },
@@ -236,9 +236,9 @@ export const SERVICE_MENU_ITEMS: ServiceMenuItem[] = [
       "研修動画の撮影・編集",
       "会場の手配（オンラインまたは貴社会議室を使用）",
     ],
-    priceLo: 150000,
-    priceHi: 250000,
-    priceNote: "半日 ¥150,000／1日 ¥250,000（税抜）・前払い（入金確認後に実施日確定）",
+    priceLo: 165000,
+    priceHi: 275000,
+    priceNote: "半日 ¥165,000／1日 ¥275,000（税込）・前払い（入金確認後に実施日確定）",
     contractType: "single",
   },
 ];

@@ -2,17 +2,18 @@
  * 共通シェル。左サイドバー（モード切替＋一覧）と上部ヘッダー（同期・マスク・施錠）。
  * 業務中に一番よく触る場所なので、余白より一覧性を優先する。
  */
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useVault } from "../hooks/use-vault";
 import { computeCaseProgress, collectAllNextActions, classifyDue, sanpoHasConcern } from "../domain/logic/case";
 import { relativeTime } from "../domain/logic/util";
 import { LEAD_STATUS_LABEL } from "../domain/data/sales";
 import type { Mode } from "../domain/types";
+import { BackupBadge } from "./automatic-backup";
 import { Mask } from "./mask";
 
 interface ShellProps {
   children: React.ReactNode;
-  onOpenSettings: () => void;
+  onOpenSettings: (section?: "data") => void;
   onOpenActions: () => void;
   onNewCase: () => void;
   onNewLead: () => void;
@@ -28,6 +29,13 @@ export function Shell({
   const { state, mutate, sync, masked, setMasked, lock, lockWarning, secondsToLock } = useVault();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [filter, setFilter] = useState("");
+  useEffect(() => { setSidebarOpen(false); }, [state?.currentCaseId, state?.currentLeadId, state?.currentMode]);
+  useEffect(() => {
+    if (!sidebarOpen) return;
+    const close = (event: KeyboardEvent) => { if (event.key === "Escape") setSidebarOpen(false); };
+    window.addEventListener("keydown", close);
+    return () => window.removeEventListener("keydown", close);
+  }, [sidebarOpen]);
 
   const actions = useMemo(
     () => (state ? collectAllNextActions(state) : []),
@@ -58,6 +66,7 @@ export function Shell({
     <div className="flex min-h-screen bg-ink-900">
       {/* ---- サイドバー ---- */}
       <aside
+        id="cockpit-navigation" aria-label="案件・リードの一覧"
         className={`fixed inset-y-0 left-0 z-40 flex w-[248px] flex-col border-r border-line bg-ink-850 transition-transform duration-150 lg:static lg:translate-x-0 ${
           sidebarOpen ? "translate-x-0" : "-translate-x-full"
         }`}
@@ -72,6 +81,7 @@ export function Shell({
           </div>
         </div>
 
+        <button className="btn btn-ghost mx-2 my-1 lg:hidden" onClick={() => setSidebarOpen(false)}>一覧を閉じる</button>
         {/* モード切替 */}
         <div className="grid grid-cols-3 gap-1 border-b border-line p-2">
           {(
@@ -127,12 +137,12 @@ export function Shell({
           {mode !== "office" && (
             <button
               className="btn btn-primary w-full"
-              onClick={mode === "cases" ? onNewCase : onNewLead}
+              onClick={() => { setSidebarOpen(false); (mode === "cases" ? onNewCase : onNewLead)(); }}
             >
               + {mode === "cases" ? "案件を追加" : "リードを追加"}
             </button>
           )}
-          <button className="btn btn-ghost mt-1 w-full justify-start" onClick={onOpenSettings}>
+          <button className="btn btn-ghost mt-1 w-full justify-start" onClick={() => { setSidebarOpen(false); onOpenSettings(); }}>
             設定・書類雛形・保全
           </button>
         </div>
@@ -148,9 +158,10 @@ export function Shell({
 
       {/* ---- 作業領域 ---- */}
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="rise rise-1 sticky top-0 z-20 flex items-center gap-2 border-b border-line bg-ink-900/95 px-3 py-2 backdrop-blur lg:px-4">
+        <header className="rise rise-1 sticky top-0 z-20 flex flex-wrap items-center gap-2 border-b border-line bg-ink-900/95 px-3 py-2 backdrop-blur lg:px-4">
           <button
             className="btn btn-ghost btn-sm lg:hidden"
+            aria-label="案件・リードの一覧を開く" aria-expanded={sidebarOpen} aria-controls="cockpit-navigation"
             onClick={() => setSidebarOpen((v) => !v)}
           >
             ☰
@@ -176,6 +187,7 @@ export function Shell({
           <div className="flex-1" />
 
           <SyncBadge />
+          <BackupBadge onOpenSettings={() => onOpenSettings("data")} />
 
           <button
             className={`btn btn-sm ${masked ? "btn-primary" : ""}`}
@@ -196,7 +208,7 @@ export function Shell({
           </div>
         )}
         {sync.state === "error" && (
-          <div className="border-b border-alert/35 bg-alert/10 px-4 py-2 text-[12px] text-alert">
+          <div role="alert" className="border-b border-alert/35 bg-alert/10 px-4 py-2 text-[12px] text-alert">
             同期できていません：{sync.lastError}
             {sync.pending > 0 && (
               <>
@@ -204,6 +216,8 @@ export function Shell({
                 未送信 <span className="num">{sync.pending}</span> 件は端末内に保持しています。
               </>
             )}
+            <p className="mt-2">再ログイン後に接続が拒否された場合は、承認済みパスキーで「本人確認してこの端末を登録」を実行してください。エラーが続いても、ブラウザーの保存データは消さないでください。</p>
+            <button className="btn btn-sm mt-2" onClick={() => onOpenSettings("data")}>同期・端末の設定を開く</button>
           </div>
         )}
 
@@ -247,7 +261,7 @@ function SyncBadge() {
         className={`size-1.5 rounded-full ${sync.state === "syncing" ? "pulse-soft" : ""}`}
         style={{ background: color }}
       />
-      <span className="hidden sm:inline">{label}</span>
+      <span>{label}</span>
       {sync.pending > 0 && <span className="num text-[11px]">{sync.pending}</span>}
     </button>
   );

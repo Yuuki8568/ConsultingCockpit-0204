@@ -44,23 +44,27 @@ function save(html: string, fileName: string) {
 }
 
 /** 本文が1本の長文（契約書・報告書・サマリ）の書き出し */
-export function downloadWord(opts: {
+export interface WordTextOptions {
   title: string;
   docNo?: string;
   meta?: string;
   body: string;
   footer?: string;
   fileName: string;
-}): void {
-  const html =
-    HEAD(opts.title) +
+}
+
+export function buildWordHtml(opts: WordTextOptions): string {
+  return HEAD(opts.title) +
     (opts.docNo ? `<div class="docno">${esc(opts.docNo)}</div>` : "") +
     `<h1>${esc(opts.title)}</h1>` +
     (opts.meta ? `<div class="meta">${esc(opts.meta)}</div>` : "") +
     `<pre>${esc(opts.body)}</pre>` +
     (opts.footer ? `<div class="foot">${esc(opts.footer)}</div>` : "") +
     "</body></html>";
-  save(html, opts.fileName);
+}
+
+export function downloadWord(opts: WordTextOptions): void {
+  save(buildWordHtml(opts), opts.fileName);
 }
 
 export interface WordSection {

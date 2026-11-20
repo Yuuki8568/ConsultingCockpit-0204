@@ -1,3 +1,5 @@
+import { setupWriteSigning,signSync } from "../write-signing";
+import { authorize } from "../step-up";
 /**
  * 金庫ストア。アプリの状態はすべてここを通る。
  *
@@ -16,6 +18,8 @@
  * - それ以外の小物（goals / salesKpi / referrals / UI状態） = meta:app
  * こうすると1案件を直しただけで全データを送り直すことがなくなる。
  */
+import { installResumeSync } from "../resume-sync";
+import { MAX_SYNC_RECORDS } from "../../../shared/sync-limits";
 import type { CaseRecord, LeadRecord, VaultState } from "../../domain/types";
 import { assertUniqueImportIds, normalizeVaultState } from "../../domain/logic/state";
 import { client } from "../api";
@@ -189,6 +193,14 @@ export class VaultStore {
     if (!this.isUnlocked() || !this.backupKdf) throw new Error("バックアップの鍵情報がありません。再度解錠してください");
     return { ...this.backupKdf };
   }
+  async backupFingerprint(state: VaultState): Promise<string> {
+    const epoch = this.epoch;
+    const key = this.macKey;
+    if (!key || !this.key) throw new Error("金庫が施錠されています");
+    const result = await hmacHex(key, 'cc-backup-state-v1|' + JSON.stringify(state));
+    this.assertSession(epoch);
+    return result;
+  }
   private assertSession(epoch: number): void {
     if (!this.key || epoch !== this.epoch) throw new Error("金庫の状態が変わりました。再度解錠してください");
   }
@@ -218,6 +230,8 @@ export class VaultStore {
    */
   private revision = 0;
   private syncing = false;
+  private dirtyScanAfter: string | undefined;
+  private oversizedSyncIds = new Set<string>();
   private syncTimer: ReturnType<typeof setTimeout> | null = null;
   /**
    * 書き込み系処理の直列化キュー。
@@ -233,6 +247,11 @@ export class VaultStore {
 
   constructor() {
     if (typeof window !== "undefined") {
+      installResumeSync({ window, document,
+        visible: () => document.visibilityState === "visible",
+        ready: () => this.isUnlocked() && this.online,
+        sync: () => this.sync(),
+      });
       window.addEventListener("online", () => {
         this.online = true;
         void this.sync();
@@ -326,6 +345,8 @@ export class VaultStore {
     void this.opQueue.finally(() => release?.());
     if (this.syncTimer) clearTimeout(this.syncTimer);
     this.syncTimer = null;
+    this.dirtyScanAfter = undefined;
+    this.oversizedSyncIds.clear();
     this.backupKdf = null;
     this.key = null;
     this.macKey = null;
@@ -387,11 +408,12 @@ export class VaultStore {
     const fingerprints = new Map<string, string>();
     for (const p of parts) fingerprints.set(p.id, await this.fingerprint(JSON.stringify(p.value)));
     this.assertSession(epoch);
-    const upgraded = rows.map(r => {
+    const upgraded: LocalRecord[] = rows.map(r => {
       const { hash: _oldHash, ...rest } = r;
       return fingerprints.has(r.id) ? { ...rest, hash: fingerprints.get(r.id) } : rest;
     });
-    if (JSON.stringify(rows) !== JSON.stringify(upgraded)) await idb.replaceRecords(rows, upgraded);
+    const changedFingerprints = upgraded.filter((r, i) => r.hash !== rows[i].hash);
+    if (changedFingerprints.length) await idb.patchRecords(rows, changedFingerprints);
     this.assertSession(epoch);
     this.state = assembleState(parts);
     this.emit();
@@ -440,6 +462,7 @@ export class VaultStore {
       });
     }
     await idb.putRecords(rows);
+    this.dirtyScanAfter = undefined;
     this.setStatus({ pending: rows.length });
   }
 
@@ -493,10 +516,10 @@ export class VaultStore {
     }
 
     if (rows.length > 0) {
-      for (const row of rows) existing.set(row.id, row);
-      await idb.replaceRecords(before, [...existing.values()]);
+      await idb.patchRecords(before, rows);
+      this.dirtyScanAfter = undefined;
     }
-    const pending = (await idb.dirtyRecords()).length;
+    const pending = await idb.dirtyRecordCount();
     this.setStatus({ pending });
   }
 
@@ -526,6 +549,7 @@ export class VaultStore {
       }
       this.assertSession(epoch);
       await idb.replaceRecords(before, [...rows.values()]);
+      this.dirtyScanAfter = undefined;
       this.assertSession(epoch);
       this.state = snapshot;
       this.emit();
@@ -566,33 +590,39 @@ export class VaultStore {
    * その編集を巻き込んで消してしまう。通信の前後で revision / キューの
    * 変化を見て、編集が挟まっていたら取り込みを次回に回す。
    */
+  async enableWriteSigning(){if(!this.key)throw new Error("金庫を解錠してください");await setupWriteSigning(this.key,this.generation);this.scheduleSync(100);}
+
   private async syncCritical(): Promise<void> {
     const key = this.key;
     const epoch = this.epoch;
     if (!key) return;
     {
       const revBefore = this.revision;
-      // 1回で送る数に上限を置く（サーバー側の受け取り上限は500件）。
+      // 1回の送信数をサーバーと揃え、外部通信の回数に余裕を残す。
       // 取り込み直後などは送信待ちが多くなるので、残りは続けて送る。
       //
       // サーバーの1件あたり上限（1MB）を超えるレコードは送ると
       // バッチ全体が 400 で捨てられ、他の正常なレコードまで
       // 永久に同期されなくなる。超過分は除外して残りだけ送り、
       // ステータスで明示する（静かに溜まり続ける状態を防ぐ）。
-      const allDirty = await idb.dirtyRecords();
-      const oversized = allDirty.filter((r) => r.ciphertext.length > MAX_SYNC_CIPHERTEXT);
-      const sendable = allDirty.filter((r) => r.ciphertext.length <= MAX_SYNC_CIPHERTEXT);
-      const dirty = sendable.slice(0, 200);
-      const moreDirty = sendable.length > dirty.length;
+      const batch = await idb.dirtySyncBatch({
+        maxRecords: MAX_SYNC_RECORDS,
+        maxBytes: 3 * 1024 * 1024,
+        maxCiphertext: MAX_SYNC_CIPHERTEXT,
+        after: this.dirtyScanAfter,
+      });
+      const dirty = batch.records;
+      const moreDirty = batch.moreDirty;
       const since = (await idb.getMeta<number>(META_CURSOR)) ?? 0;
       const deviceId = deviceIdFor();
 
       this.assertSession(epoch);
-      const res = await client.sync.push({
+      const request = {
         generation: this.generation,
         deviceId,
         since,
         records: dirty.map((r) => ({
+          operation: (r.deleted ? "delete" : "put") as "delete"|"put",
           id: r.id,
           type: r.type as "case" | "lead" | "profile" | "template" | "meta" | "log",
           ciphertext: r.ciphertext,
@@ -602,9 +632,16 @@ export class VaultStore {
           // この編集が元にしたサーバー版。これが一致していれば競合扱いにしない。
           baseSeq: r.seq,
         })),
-      }, { signal: AbortSignal.timeout(15000) });
+      };
+      const proof=dirty.length?await signSync(key,request):undefined;
+      this.assertSession(epoch);
+      const res=await client.sync.push({...request,proof},{signal:AbortSignal.timeout(15000)});
 
       this.assertSession(epoch);
+      for (const row of dirty) this.oversizedSyncIds.delete(row.id);
+      for (const id of batch.oversizedIds) {
+        if (this.oversizedSyncIds.size < 8) this.oversizedSyncIds.add(id);
+      }
       // 送信できたものは dirty を落とす
       const acceptedSet = new Set(res.accepted);
       const cleared: LocalRecord[] = dirty
@@ -621,6 +658,7 @@ export class VaultStore {
         // その編集が消えるため、適用は次回に回す。cursor も進めないので
         // 同じ差分は次回また受け取れる。dirty 落としは済んでいて問題ない
         // （新しい編集分は後続の persist が dirty=1 で書き直す）。
+        this.dirtyScanAfter = batch.nextAfter;
         this.setStatus({ state: "idle" });
         this.scheduleSync(800);
         return;
@@ -663,10 +701,15 @@ export class VaultStore {
         }
       }
 
+      const resolvedConflicts = new Set(res.conflicts.map(c => c.id));
       // 受信差分を取り込む
       if (res.changed.length > 0) {
         const incoming: LocalRecord[] = [];
         for (const c of res.changed) {
+          // A later batch may still contain local edits. Do not replace those
+          // with an older server row; the next push resolves their baseSeq.
+          const local = await idb.getRecord(c.id);
+          if (local?.dirty && !resolvedConflicts.has(c.id)) continue;
           // 受け取った暗号文の指紋を取るために一度開く（他端末の変更だけなので件数は少ない）
           let hash: string | undefined;
           try {
@@ -698,17 +741,19 @@ export class VaultStore {
       if (res.changed.length > 0 || res.conflicts.length > 0) {
         await this.rebuildFromLocal();
       }
-      const pending = (await idb.dirtyRecords()).length;
-      if (oversized.length > 0) {
+      const pending = await idb.dirtyRecordCount();
+      // Advance only after successful application. A network/storage failure
+      // retains the previous cursor so no pending row is skipped on retry.
+      this.dirtyScanAfter = batch.nextAfter;
+      if (!pending) this.oversizedSyncIds.clear();
+      if (this.oversizedSyncIds.size > 0) {
         this.setStatus({
           state: "error",
           pending,
           lastSyncedAtMs: now,
           conflicts: conflictCount,
           lastError:
-            `レコードが同期上限（1MB）を超えているため送信できません: ${oversized
-              .map((r) => r.id)
-              .join(", ")}。` +
+            `同期上限を超えているレコードがあります（例: ${[...this.oversizedSyncIds].join(", ")}）。` +
             "案件に溜まった生成済み書類を古いものから削除してください。",
         });
       } else {
@@ -875,12 +920,13 @@ export class VaultStore {
     newKey: CryptoKey,
     newMacKey: CryptoKey,
     onProgress?: (label: string) => void,
+    validate?: (candidate: Pick<RekeyPrepared, "records" | "generation">) => void,
   ): Promise<RekeyPrepared> {
     if (!this.key) throw new Error("金庫が施錠されています");
     if (this.rekeying || await idb.getMeta("rekeyJournal")) throw new Error("未完了の鍵変更があります。再解錠して復旧してください");
     await this.sync();
     await this.flushPending();
-    if ((await idb.dirtyRecords()).length) throw new Error("未同期の編集があります。同期を完了してから変更してください");
+    if (await idb.dirtyRecordCount()) throw new Error("未同期の編集があります。同期を完了してから変更してください");
     this.rekeying = true;
     const oldKey = this.key!;
     const epoch = this.epoch;
@@ -909,6 +955,10 @@ export class VaultStore {
         hash: await hmacHex(newMacKey, JSON.stringify(plain)),
       });
     }
+
+    // Fail an unsendable request before any temporary media or durable journal.
+    validate?.({ records, generation: this.generation });
+    this.assertSession(epoch);
 
     // 録画：仮チャンク（__rekey__）として新しい鍵で封じ直して置く。
     // 正式採用はコミット時。AAD は本来の mediaId のものを付けるので、
@@ -971,6 +1021,8 @@ export class VaultStore {
     const current = await idb.allRecords();
     const newById = new Map(prepared.rows.map(r => [r.id, r]));
     const expected = new Map(prepared.before.map(r => [r.id, r]));
+    if (current.length !== expected.size || current.some(row => !expected.has(row.id)))
+      throw new Error("別タブで原本の追加・削除を検知しました。復旧原本は保持されています");
     for (const row of current) {
       if (JSON.stringify(row) !== JSON.stringify(expected.get(row.id)) &&
           JSON.stringify(row) !== JSON.stringify(newById.get(row.id)))
@@ -989,7 +1041,7 @@ export class VaultStore {
     try { await open(this.key, journal.marker, "cc4-rekey-journal"); }
     catch {
       if (journal.request && this.generation === journal.generation) {
-        await client.vault.rekey(journal.request, { signal: AbortSignal.timeout(15000) });
+        await client.vault.rekey({...journal.request,authorization:await authorize("vault:rekey",journal.request)}, { signal: AbortSignal.timeout(15000) });
       }
       throw new Error("未完了の鍵変更を再送しました。変更先の新パスフレーズで再解錠してください。旧原本と復旧情報は保持されています");
     }

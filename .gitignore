@@ -76,3 +76,10 @@ packages/mobile/scripts/*
 # Security test reports (contain only dummy fixtures, generated per run)
 packages/web/playwright-report/
 packages/web/test-results/
+
+# Cloudflare local secrets and generated bundles
+.dev.vars*
+.wrangler/
+
+__pycache__/
+*.sqlite*

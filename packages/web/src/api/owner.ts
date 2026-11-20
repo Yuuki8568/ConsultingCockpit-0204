@@ -19,7 +19,7 @@ export function ownerEmails(): string[] {
     .split(",")
     .map((s) => s.trim().toLowerCase())
     .filter(Boolean);
-  return list.length > 0 ? list : FALLBACK;
+  return list.length > 0 ? list : (process.env.NODE_ENV === "production" ? [] : FALLBACK);
 }
 
 /** このメールアドレスは本人か */

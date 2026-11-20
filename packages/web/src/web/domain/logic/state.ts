@@ -40,6 +40,7 @@ export function makeEmptyVaultState(): VaultState {
 export function makeEmptyCase(companyName = ""): CaseRecord {
   const c = {
     id: newId("C"),
+    contractTemplateVersion: undefined,
     createdAt: nowISO(),
     name: companyName,
     settings: {
