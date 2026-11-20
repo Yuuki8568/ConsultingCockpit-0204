@@ -11,7 +11,7 @@ module.exports = async function runBoundedReaderTests() {
   const temporary = fs.mkdtempSync('/tmp/cockpit-bounded-reader-');
   const source = createClient({ url: 'file:' + temporary + '/source.sqlite', intMode: 'bigint' });
   const statements = [], payloads = [];
-  let commits = 0;
+  let commits = 0, encodedCiphertext;
   const wrapped = { async transaction(mode) {
     assert.equal(mode, 'read');
     const tx = await source.transaction(mode);
@@ -19,7 +19,10 @@ module.exports = async function runBoundedReaderTests() {
       if (k === 'execute') return async statement => {
         assert.match(statement.sql, /^SELECT /); assert.ok(!/\bOFFSET\b/i.test(statement.sql));
         statements.push(statement); const result = await t.execute(statement);
-        if (statement.sql.includes(' AS _bytes,')) payloads.push(result.rows);
+        if (statement.sql.includes(' AS _bytes,')) {
+          payloads.push(result.rows);
+          if (encodedCiphertext !== undefined) return { rows: result.rows.map(row => ({ ...row, ciphertext: encodedCiphertext })) };
+        }
         return result;
       };
       if (k === 'commit') return async () => { commits++; return t.commit(); };
@@ -99,10 +102,50 @@ module.exports = async function runBoundedReaderTests() {
     await source.execute("UPDATE record SET updated_at_ms=0 WHERE id='a-large'");
     await source.execute("UPDATE record SET ciphertext=CAST(x'FFFE' AS TEXT) WHERE id='a-large'");
     await assert.rejects(read(wrapped, 'record', null), /^Error: BOUNDED_UNSUPPORTED_VALUE$/);
-    await source.execute("UPDATE record SET ciphertext='small' WHERE id='a-large'");
-    // The raw-byte guard can reject a row conservatively before actual JSON size.
-    await assert.rejects(read(wrapped, 'record', null, 70), /^Error: BOUNDED_ROW_TOO_LARGE$/);
-    assert.equal((await read(wrapped, 'record', null)).done, false);
+    const updateValue = (value, number = 1) => source.execute({
+      sql: "UPDATE record SET ciphertext=?,updated_at_ms=? WHERE id='a-large'", args: [value, number],
+    });
+    const hiddenRow = () => {
+      const blocked = payloads.at(-1)[0];
+      for (const [name, value] of Object.entries(blocked))
+        if (!name.startsWith('_')) assert.equal(value, null);
+    };
+    await updateValue('small');
+    // Invalid transport encodings must not be accepted by either hex decoder.
+    for (const malformed of ['c3a9', '4', '4G', '1\n', ' 4', '４１', 'C0AF']) {
+      encodedCiphertext = malformed;
+      await assert.rejects(read(wrapped, 'record', null), /^Error: BOUNDED_UNSUPPORTED_VALUE$/);
+    }
+    encodedCiphertext = undefined;
+    assert.equal((await read(wrapped, 'record', null, 70)).done, false);
+    const largePrintable = 'YWFh'.repeat((64 * 1024 - 1024) / 4);
+    await updateValue(largePrintable);
+    const largePage = await read(wrapped, 'record', null);
+    assert.equal(largePage.values[largePage.columns.indexOf('ciphertext')], largePrintable);
+    assert.equal(Number(payloads.at(-1)[0]._json_bound), largePage.jsonBytes);
+    const exactFit = largePrintable + 'a'.repeat(ceiling - largePage.jsonBytes);
+    await updateValue(exactFit);
+    assert.equal((await read(wrapped, 'record', null)).jsonBytes, ceiling);
+    await updateValue(exactFit + 'a');
+    await assert.rejects(read(wrapped, 'record', null), /^Error: BOUNDED_ROW_TOO_LARGE$/);
+    hiddenRow();
+    await updateValue('\u0000'.repeat(Math.ceil(65536 / 6)));
+    await assert.rejects(read(wrapped, 'record', null), /^Error: BOUNDED_ROW_TOO_LARGE$/);
+    assert.ok(Number(payloads.at(-1)[0]._bytes) < ceiling);
+    hiddenRow();
+    const escapes = '\u0000\b\t\n\f\r"\\日本語\u2028\u2029'.repeat(48);
+    for (const number of [0, Number.MIN_VALUE, -0.0000010000000000000002, Number.MAX_SAFE_INTEGER]) {
+      await updateValue(escapes, number);
+      const page = await read(wrapped, 'record', null);
+      assert.equal(page.values[page.columns.indexOf('ciphertext')], escapes);
+      assert.equal(page.values[page.columns.indexOf('updated_at_ms')], number);
+      assert.ok(Number(payloads.at(-1)[0]._json_bound) >= page.jsonBytes);
+      assert.equal(Buffer.byteLength(JSON.stringify(page.values)), page.jsonBytes);
+    }
+    await source.execute("UPDATE record SET updated_at_ms=1e999 WHERE id='a-large'");
+    await assert.rejects(read(wrapped, 'record', null), /^Error: BOUNDED_UNSUPPORTED_VALUE$/);
+    hiddenRow();
+    await updateValue('small');
 
     // Incorrect ordering assumptions cannot silently alter traversal.
     await source.execute('DROP TABLE security_counter');

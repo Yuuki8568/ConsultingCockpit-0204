@@ -2,6 +2,7 @@
  * Results certify one table at one observation only, never a global snapshot.
  */
 import { BUSINESS_SCHEMA_CONTRACT } from "./d1-schema-contract";
+import { decodeSqliteHex } from "./d1-sqlite-hex";
 
 type Query = (sql: string, args: (string | number)[]) => Promise<readonly Record<string, unknown>[]>;
 const MAX_SQL_BYTES = 16 * 1024;
@@ -27,11 +28,8 @@ export async function assertBusinessSchema(query: Query, table: string) {
         if (Number(row.implicit_sql) !== 1 || row.ddl !== null) throw Error("SCHEMA_DEFINITION_MISMATCH");
         continue;
       }
-      if (Number(row.implicit_sql) !== 0 || typeof row.ddl !== "string" || row.ddl.length > MAX_SQL_BYTES * 2 ||
-          !row.ddl.length || row.ddl.length % 2 || !/^[0-9A-F]+$/.test(row.ddl))
-        throw Error("SCHEMA_DEFINITION_MISMATCH");
-      const bytes = new Uint8Array(row.ddl.length / 2);
-      for (let j = 0; j < bytes.length; j++) bytes[j] = parseInt(row.ddl.slice(j * 2, j * 2 + 2), 16);
+      const bytes = decodeSqliteHex(row.ddl, MAX_SQL_BYTES);
+      if (Number(row.implicit_sql) !== 0 || !bytes?.length) throw Error("SCHEMA_DEFINITION_MISMATCH");
       const sha256 = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)),
         b => b.toString(16).padStart(2, "0")).join("");
       if (sha256 !== expected.sqlSha256) throw Error("SCHEMA_DEFINITION_MISMATCH");
