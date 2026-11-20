@@ -4,16 +4,20 @@ import { drizzle } from "drizzle-orm/libsql";
 import { call } from "@orpc/server";
 import { readFileSync, mkdtempSync, rmSync } from "node:fs";
 import { eq } from "drizzle-orm";
-import { databaseContext } from "../src/api/database";
+import { currentSourceHostMatches, databaseContext, withDatabase } from "../src/api/database";
 import * as schema from "../src/api/database/schema";
 import { sync } from "../src/api/routes/sync";
 import { ownerEmails } from "../src/api/owner";
 import { operationHash, signingMessage } from "../src/shared/operation-proof";
 import { MAX_SYNC_PAGE_BYTES, MAX_SYNC_PAGE_ROWS } from "../src/shared/sync-page";
+import { createHash } from "node:crypto";
+import { matchesSourceHost } from "../src/api/database/source-host";
 
 const iv = Buffer.alloc(12, 2).toString("base64");
 const cipher = Buffer.alloc(32, 3).toString("base64");
 const requestContext = { context: { headers: new Headers() } };
+const syntheticHost = "isolated-fixture.turso.io";
+const expectedHost = createHash("sha256").update(syntheticHost).digest("hex");
 
 async function fixture(run: (f: {
   db: ReturnType<typeof drizzle<typeof schema>>;
@@ -52,6 +56,61 @@ async function fixture(run: (f: {
 }
 
 const pull = (after = 0) => call(sync.pullAll, { deviceId: "test-device", after }, requestContext);
+
+test("source identity only accepts the exact logical Turso URL and returns a boolean", async () => {
+  const url = "libsql://" + syntheticHost;
+  expect(await matchesSourceHost(url, expectedHost)).toBe(true);
+  expect(await matchesSourceHost(url + "/", expectedHost)).toBe(true);
+  for (const invalid of [undefined, "file:local", url + ":443", url + "/../", url + "?x=1", url + "#", url + "\n",
+    "https://" + syntheticHost, "libsql://user@" + syntheticHost, url + ".invalid",
+    "libsql://bad_label.turso.io", "libsql://" + "a".repeat(64) + ".turso.io"])
+    expect(await matchesSourceHost(invalid, expectedHost)).toBe(false);
+  expect(await matchesSourceHost(url, "0".repeat(64))).toBe(false);
+  expect(await matchesSourceHost(url, expectedHost + "\n")).toBe(false);
+});
+
+test("source identity uses the URL captured when the request-local connection opened", async () => {
+  const previous = process.env.DATABASE_URL;
+  try {
+    process.env.DATABASE_URL = ":memory:";
+    await withDatabase(async () => {
+      process.env.DATABASE_URL = "libsql://" + syntheticHost;
+      expect(await currentSourceHostMatches(expectedHost)).toBe(false);
+    });
+  } finally {
+    if (previous === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = previous;
+  }
+});
+
+test("only an explicit owner stats request checks the request-local source", async () => {
+  await fixture(async () => {
+    let checks = 0;
+    const active = databaseContext.getStore()!;
+    const context = { ...active, checkSourceHost: async (expected: string) => {
+      checks++;
+      return matchesSourceHost("libsql://" + syntheticHost, expected);
+    }};
+    await databaseContext.run(context, async () => {
+      for (const input of [undefined, null, {}]) {
+        expect(await call(sync.stats, input, requestContext)).toEqual({ byType: {}, latestUpdatedAtMs: 0 });
+      }
+      expect(checks).toBe(0);
+      for (const [expected, matched] of [[expectedHost, true], ["0".repeat(64), false]] as const) {
+        const result = await call(sync.stats, { expectedSourceHostSha256: expected }, requestContext);
+        expect(result).toEqual({ byType: {}, latestUpdatedAtMs: 0, sourceHostMatches: matched });
+      }
+      await expect(call(sync.stats, {expectedSourceHostSha256: "invalid"}, requestContext)).rejects.toThrow();
+      expect(checks).toBe(2);
+      for (const session of [null, {user: {email: "unapproved@example.invalid"}}]) {
+        const unauthorized = { ...context, auth: {api: {getSession: async () => session}} };
+        await databaseContext.run(unauthorized, () => expect(call(sync.stats, {expectedSourceHostSha256: expectedHost},
+          requestContext)).rejects.toThrow());
+      }
+      expect(checks).toBe(2);
+    });
+  });
+});
 const emptyPush = (since = 0) => call(sync.push, { deviceId: "test-device", generation: 1, since, records: [] }, requestContext);
 
 test("libSQL pages a large backlog without loading all ciphertexts or crossing users", async () => {

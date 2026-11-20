@@ -82,7 +82,8 @@ const {build}=dep('esbuild'),{Miniflare,convertV4MiniflareOptions}=dep('miniflar
  assert.deepEqual((await rpc('sync/push',signed)).accepted,['case-one']);
  await assert.rejects(pushD1(db,{...p,deviceId:input.id},signed));
  assert.equal((await rpc('sync/pullAll',{deviceId:input.id,after:0})).records[0].ciphertext,cipher);
- assert.equal((await rpc('sync/stats')).byType.case,1);
+ const stats=await rpc('sync/stats');assert.equal(stats.byType.case,1);assert.ok(!Object.hasOwn(stats,'sourceHostMatches'));
+ assert.deepEqual(await rpc('sync/stats',{expectedSourceHostSha256:'0'.repeat(64)}),{...stats,sourceHostMatches:false});
  assert.equal((await rpc('devices/list'))[0].id,input.id);
  await rpc('devices/logLogin',{kind:'unlock_ok',deviceId:'forged-device'});
  assert.equal((await rpc('devices/loginHistory',{limit:10}))[0].deviceId,input.id);

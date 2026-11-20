@@ -3,6 +3,7 @@ import { authorize } from "../lib/step-up";
 import { rewrapWriteKey } from "../lib/write-signing";
 import { assertRekeyCapacity } from "../../shared/rekey-capacity";
 import { AuditVerificationControl } from "./audit-verification";
+import { SourceHostCheck } from "./source-host-check";
 /** 設定 — 受託者プロフィール／書類雛形／文面ライブラリ／紹介／保全／端末／監査／取込 */
 import { useEffect, useRef, useState } from "react";
 import { useVault } from "../hooks/use-vault";
@@ -475,6 +476,7 @@ function SecurityTab() {
           />
           <Stat label="案件 / リード" value={`${state.cases.length} / ${state.leads.length}`} />
         </Grid>
+        <SourceHostCheck />
         {sync.lastError && (
           <div className="mt-3">
             <Note tone="alert">{sync.lastError}</Note>

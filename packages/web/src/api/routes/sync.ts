@@ -5,7 +5,8 @@ import { archiveRecords, syncBudget, type Transaction } from "../security/contro
 import { ORPCError } from "@orpc/server";
 import { and, eq, gt, inArray, sql } from "drizzle-orm";
 import { z } from "zod";
-import { db } from "../database";
+import { currentSourceHostMatches, db } from "../database";
+import { statsInput } from "../database/source-host";
 import * as schema from "../database/schema";
 import { authed } from "../middleware/auth";
 import { classifySyncError } from "../sync-diagnostics";
@@ -273,7 +274,7 @@ export const sync = {
     }),
 
   /** 保存状況の概観（件数と最終更新）。中身は見えないので件数だけ。 */
-  stats: authed.handler(async ({ context }) => {
+  stats: authed.input(statsInput).handler(async ({ context, input }) => {
     const rows = await db
       .select({
         type: schema.record.type,
@@ -291,7 +292,8 @@ export const sync = {
       byType[r.type] = Number(r.n);
       if (Number(r.latest) > latest) latest = Number(r.latest);
     }
-    return { byType, latestUpdatedAtMs: latest };
+    return { byType, latestUpdatedAtMs: latest, ...(input?.expectedSourceHostSha256
+      ? { sourceHostMatches: await currentSourceHostMatches(input.expectedSourceHostSha256) } : {}) };
   }),
 
   /** 保持期間ポリシーの適用：論理削除から N 日超えた行を物理削除する */
