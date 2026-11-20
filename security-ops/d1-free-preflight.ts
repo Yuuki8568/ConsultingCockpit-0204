@@ -9,6 +9,7 @@ import type { D1Database } from "@cloudflare/workers-types";
 import { migrationDefinitions } from "../packages/web/src/api/database/d1/migration-schema";
 import { inspectCatalog, requireEmptyTables } from "./d1-inventory";
 import { assertBusinessSchema, assertBusinessForeignKeys } from "./d1-schema-guard";
+import { maximumJsonSize, rowSizeExpressions } from "./d1-row-size";
 
 const quote = (name: string) => '"' + name.replaceAll('"', '""') + '"';
 export const FREE_D1_PLANNING_LIMITS = Object.freeze({
@@ -87,9 +88,10 @@ export async function inspectFreeMigrationTable(
     const sourceInfo = await tx.execute(`PRAGMA table_info(${quote(def.name)})`);
     if (!columnLayoutMatches(sourceInfo.rows as unknown as { name: unknown; pk: unknown }[], def))
       throw Error("PREFLIGHT_SOURCE_SCHEMA_MISMATCH");
-    const bytes = def.columns.map((c) => `coalesce(length(CAST(${quote(c)} AS BLOB)),0)`).join("+");
-    const unsupported = def.columns.map((c) => `typeof(${quote(c)}) NOT IN ('null','text','integer','real')`).join(" OR ");
-    const size = await tx.execute(`SELECT count(*) n,coalesce(sum(${bytes}),0) bytes,coalesce(max(${bytes}),0) largest,coalesce(sum(CASE WHEN ${unsupported} THEN 1 ELSE 0 END),0) unsupported FROM main.${quote(def.name)}`);
+    const { raw, unsupported, jsonUpperBound } = rowSizeExpressions(def.columns, FREE_D1_PLANNING_LIMITS.plannedStepJsonBytes);
+    const size = await tx.execute(`SELECT count(*) n,coalesce(sum(${raw}),0) bytes,coalesce(max(${raw}),0) largest,
+      coalesce(max(${jsonUpperBound}),0) json_bound,
+      coalesce(sum(CASE WHEN ${unsupported} THEN 1 ELSE 0 END),0) unsupported FROM main.${quote(def.name)}`);
     const row = size.rows[0];
     const count = natural(row.n), rawBytes = natural(row.bytes), largest = natural(row.largest);
     if (natural(row.unsupported)) throw Error("PREFLIGHT_UNSUPPORTED_SOURCE_VALUE");
@@ -109,9 +111,7 @@ export async function inspectFreeMigrationTable(
     const result = {
       table: def.name, rows: count, rawBytes,
       largestRawRowBytes: largest,
-      // A deliberately conservative JSON bound, not a measured payload size.
-      // Six bytes cover escaping of any byte; fixed overhead covers nulls and delimiters.
-      jsonRowUpperBoundBytes: count ? natural(largest * 6 + def.columns.length * 6 + 2) : 0,
+      jsonRowUpperBoundBytes: natural(row.json_bound),
       destinationRows: natural(targetCount.results[0].n),
       destinationIndexCount: natural(targetIndexes.results.length),
     };
@@ -145,7 +145,8 @@ export function planFreeD1Migration(tables: readonly TablePreflight[], usage?: F
   for (const t of tables) {
     for (const key of ["rows", "rawBytes", "largestRawRowBytes", "jsonRowUpperBoundBytes", "destinationRows", "destinationIndexCount"] as const) natural(t[key]);
     const def = migrationDefinitions.find((d) => d.name === t.table)!;
-    if (t.jsonRowUpperBoundBytes !== (t.rows ? natural(t.largestRawRowBytes * 6 + def.columns.length * 6 + 2) : 0))
+    if (t.rows && (t.jsonRowUpperBoundBytes < Math.max(t.largestRawRowBytes, 2 * def.columns.length + 1) ||
+        t.jsonRowUpperBoundBytes > natural(maximumJsonSize(t.largestRawRowBytes, def.columns.length))))
       throw Error("PREFLIGHT_INVALID_COUNT");
     if (t.largestRawRowBytes > t.rawBytes || (!t.rows && (t.rawBytes || t.largestRawRowBytes || t.jsonRowUpperBoundBytes)))
       throw Error("PREFLIGHT_INVALID_COUNT");

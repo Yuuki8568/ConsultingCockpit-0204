@@ -8,8 +8,9 @@ import type { Client } from "@libsql/client";
 import type { D1Database } from "@cloudflare/workers-types";
 import { migrationDefinitions } from "../packages/web/src/api/database/d1/migration-schema";
 import { assertBusinessSchema, assertBusinessForeignKeys } from "./d1-schema-guard";
+import { boundedRowStatement } from "./d1-row-size";
+import { decodeSqliteHex } from "./d1-sqlite-hex";
 
-const quote = (name: string) => '"' + name.replaceAll('"', '""') + '"';
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 export const BOUNDED_ROW_JSON_BYTES = 64 * 1024;
@@ -35,10 +36,8 @@ function normalize(value: unknown): Cell {
 function decodeText(value: unknown, rawLimit: number): string {
   // Hex avoids native libSQL's truncation of TEXT results at embedded NUL.
   // Fatal UTF-8 decoding rejects malformed SQLite TEXT rather than repairing it.
-  if (typeof value !== "string" || value.length > rawLimit * 2 || value.length % 2 ||
-      !/^[0-9A-F]*$/.test(value)) throw Error("BOUNDED_UNSUPPORTED_VALUE");
-  const bytes = new Uint8Array(value.length / 2);
-  for (let i = 0; i < bytes.length; i++) bytes[i] = parseInt(value.slice(i * 2, i * 2 + 2), 16);
+  const bytes = decodeSqliteHex(value, rawLimit);
+  if (!bytes) throw Error("BOUNDED_UNSUPPORTED_VALUE");
   try { return decoder.decode(bytes); } catch { throw Error("BOUNDED_UNSUPPORTED_VALUE"); }
 }
 
@@ -107,23 +106,8 @@ async function readBoundedRow(source: { transaction(mode: "read"): Promise<ReadT
       r.name !== def.keys[i] || r.coll !== "BINARY" || Number(r.desc) !== 0))
       throw Error("BOUNDED_SCHEMA_MISMATCH");
 
-    const bytes = def.columns.map((c) => `coalesce(length(CAST(${quote(c)} AS BLOB)),0)`).join("+");
-    const unsupported = def.columns.map((c) => `typeof(${quote(c)}) NOT IN ('null','text','integer','real')`).join(" OR ");
-    const validKeys = def.keys.map((c) => `typeof(${quote(c)})='text'`).join(" AND ");
-    // Six output bytes per source byte plus per-cell overhead bounds JSON
-    // escapes and nulls conservatively. Numeric safety is checked below.
-    const rawLimit = Math.floor((maxJsonBytes - def.columns.length * 6 - 2) / 6);
-    const guard = `((${bytes})<=${rawLimit} AND NOT (${unsupported}) AND (${validKeys}))`;
-    // Qualify original keys so ORDER BY cannot resolve to the encoded output
-    // aliases. Put explicit collation on the RHS: wrapping the LHS inhibits
-    // SQLite's composite-key seek optimization.
-    const keySql = def.keys.map((c) => `_source.${quote(c)}`).join(",");
-    const order = def.keys.map((c) => `_source.${quote(c)} COLLATE BINARY`).join(",");
-    const where = cursor === null ? "" : ` WHERE (${keySql})>(${def.keys.map(() => "? COLLATE BINARY").join(",")})`;
-    const statement = {
-      sql: `SELECT (${bytes}) AS _bytes,(${unsupported}) AS _unsupported,(${validKeys}) AS _valid_keys,${def.columns.map((c, i) => `typeof(${quote(c)}) AS _type_${i},CASE WHEN ${guard} THEN CASE WHEN typeof(${quote(c)})='text' THEN hex(CAST(${quote(c)} AS BLOB)) ELSE ${quote(c)} END ELSE NULL END AS ${quote(c)}`).join(",")} FROM main.${quote(def.name)} AS _source${where} ORDER BY ${order} LIMIT 1`,
-      args: cursor ?? [],
-    };
+    const rawLimit = maxJsonBytes;
+    const statement = boundedRowStatement(def, cursor, maxJsonBytes);
     const result = await tx.execute(statement);
     if (result.rows.length > 1) throw Error("BOUNDED_QUERY_FAILED");
     let answer: BoundedRow = { done: true };
@@ -132,7 +116,10 @@ async function readBoundedRow(source: { transaction(mode: "read"): Promise<ReadT
       if (!Number.isSafeInteger(rawBytes) || rawBytes < 0) throw Error("BOUNDED_UNSUPPORTED_VALUE");
       if (Number(row._unsupported) !== 0 || Number(row._valid_keys) !== 1)
         throw Error("BOUNDED_UNSUPPORTED_VALUE");
-      if (rawBytes > rawLimit) throw Error("BOUNDED_ROW_TOO_LARGE");
+      const bound = Number(row._json_bound);
+      if (!Number.isSafeInteger(bound) || bound < 0) throw Error("BOUNDED_UNSUPPORTED_VALUE");
+      if (rawBytes > rawLimit || bound > maxJsonBytes) throw Error("BOUNDED_ROW_TOO_LARGE");
+
       const values = def.columns.map((c, i) => row[`_type_${i}`] === "text" ? decodeText(row[c], rawLimit) : normalize(row[c]));
       const nextCursor = def.keys.map((c) => values[def.columns.indexOf(c)]);
       if (nextCursor.some((v) => typeof v !== "string")) throw Error("BOUNDED_UNSUPPORTED_VALUE");
